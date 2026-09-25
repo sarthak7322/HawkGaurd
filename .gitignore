@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# builds
+extension/dist/
+.next/
+
+# secrets — never commit API keys
+.env
+.env.local
+*.env
+!.env.example
+
+# runtime data (captured honeypot log, backend/tunnel logs)
+backend/data/
+*.log
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
+.idea/

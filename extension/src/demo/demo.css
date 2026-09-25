@@ -1,0 +1,113 @@
+/* Live demo layout — shared tokens and components come from ../ui/modern.css */
+
+.app { max-width: 1320px; margin: 0 auto; padding: 20px 24px 48px; }
+
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
+
+/* ─── Controls ────────────────────────────────── */
+.controls { display: flex; flex-wrap: wrap; gap: 18px 28px; margin-bottom: 22px; }
+.control { min-width: 0; }
+.control-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+
+.personas { display: flex; flex-wrap: wrap; gap: 8px; }
+.persona {
+  display: flex; align-items: center; gap: 10px; text-align: left;
+  padding: 6px 14px 6px 6px; border-radius: 14px;
+  border: 1px solid var(--border); background: var(--surface);
+  transition: border-color .15s, background .15s;
+}
+.persona:hover { background: var(--surface-2); }
+.persona.is-active { border-color: rgba(113, 120, 245, 0.6); background: rgba(113, 120, 245, 0.1); }
+.persona-text { font-weight: 500; font-size: 13px; line-height: 1.25; }
+.persona-text small { display: block; color: var(--muted); font-size: 11px; font-weight: 400; }
+
+/* ─── Stage layout ────────────────────────────── */
+.stage { display: grid; grid-template-columns: 410px minmax(0, 1fr); gap: 28px; align-items: start; }
+.phone-col { position: sticky; top: 20px; }
+
+/* ─── Phone ───────────────────────────────────── */
+.phone {
+  animation: rise .6s cubic-bezier(.2, .8, .2, 1) both;
+  height: min(720px, calc(100vh - 150px)); min-height: 520px;
+  display: flex; flex-direction: column;
+  border-radius: 36px; overflow: hidden;
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 0 0 7px #15171f, 0 0 0 8px rgba(255,255,255,.06), 0 40px 80px -30px rgba(0, 0, 0, 0.9);
+}
+.phone-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 18px 18px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--border);
+}
+.phone-contact { flex: 1; min-width: 0; }
+.phone-name { font-weight: 600; }
+.phone-number { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+
+.thread {
+  flex: 1; overflow-y: auto; padding: 16px 14px 8px;
+  display: flex; flex-direction: column; gap: 10px;
+  scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.12) transparent;
+}
+.thread-day { align-self: center; font-size: 11px; color: var(--muted); background: var(--surface); padding: 4px 10px; border-radius: 999px; margin-bottom: 4px; text-align: center; }
+.thread-empty { margin: auto; text-align: center; max-width: 290px; color: var(--text-2); padding: 20px 0; }
+.thread-empty p { margin: 6px 0; font-size: 13px; }
+.thread-empty .btn { margin-top: 16px; }
+.thread-empty-icon {
+  width: 56px; height: 56px; margin: 0 auto 14px; border-radius: 18px;
+  display: grid; place-items: center; background: rgba(113, 120, 245, 0.12); color: var(--accent);
+}
+.thread-empty-title { font-weight: 600; font-size: 16px; color: var(--text); margin-bottom: 4px; }
+
+.composer { display: flex; gap: 8px; padding: 10px 12px 14px; border-top: 1px solid var(--border); }
+.composer input {
+  flex: 1; min-width: 0; padding: 11px 15px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text); font: inherit; font-size: 13.5px; outline: none;
+}
+.composer input:focus { border-color: rgba(113, 120, 245, 0.6); }
+.composer button:not(:disabled):hover { transform: scale(1.08) rotate(-8deg); }
+.composer button {
+  transition: transform .2s cubic-bezier(.2, 1.4, .4, 1);
+  width: 42px; height: 42px; flex: 0 0 auto; border-radius: 50%; border: 0;
+  display: grid; place-items: center; background: var(--accent-grad); color: #fff;
+}
+
+.playbar { display: flex; gap: 8px; margin-top: 22px; }
+.playbar .btn:first-child { flex: 1; }
+
+/* ─── Case file ───────────────────────────────── */
+.casefile { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.threat { display: flex; gap: 22px; align-items: center; }
+.threat-body { min-width: 0; flex: 1; }
+.threat-mascot { margin: -14px -6px -18px 0; }
+.threat-title { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; margin: 2px 0 8px; }
+.signals { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.signals li { position: relative; padding-left: 14px; color: var(--text-2); font-size: 13px; }
+.signals li::before { content: ''; position: absolute; left: 0; top: .6em; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.intel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 20px; }
+.report-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+
+/* ─── Responsive ──────────────────────────────── */
+@media (max-width: 1000px) {
+  .stage { grid-template-columns: minmax(0, 1fr); }
+  .phone-col { position: static; max-width: 440px; width: 100%; margin: 0 auto; }
+}
+@media (max-width: 640px) {
+  .app { padding: 16px 16px 40px; }
+  .phone { height: 600px; border-radius: 28px; }
+  .threat { flex-direction: column; align-items: flex-start; }
+  .stats { grid-template-columns: minmax(0, 1fr); }
+  .intel { grid-template-columns: minmax(0, 1fr); }
+  .segmented { display: flex; }
+  .brand-sub { display: none; }
+}
+
+/* Phone glass + a faint moving sheen on its frame */
+.phone { background: linear-gradient(180deg, rgba(20, 22, 32, .92), rgba(10, 11, 16, .96)); backdrop-filter: blur(20px); }
+.phone-head { backdrop-filter: blur(12px); }
+.thread-empty .empty-mascot { margin-bottom: 8px; }
+@media (max-width: 640px) { .threat-mascot { position: absolute; right: 10px; top: 18px; width: 72px; height: 72px; } .threat { position: relative; } }

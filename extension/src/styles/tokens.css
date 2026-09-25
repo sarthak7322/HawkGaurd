@@ -1,0 +1,111 @@
+/*
+  HawkGuard Design System
+  ─────────────────────────
+  Visual concept: an investigator's field notebook meets a hawk's-eye view.
+  Not another blue-gradient "cyber shield". Warm parchment on ink,
+  hawk-iris gold as the signal color, evidence displayed like case notes.
+*/
+
+:root {
+  /* Ink palette — night sky, hawk's vantage point */
+  --ink-900: #0F1729;         /* deepest — chrome, borders */
+  --ink-800: #182238;         /* panels, cards on dark */
+  --ink-700: #253048;         /* raised surfaces */
+  --ink-600: #3A4560;         /* dividers on dark */
+  --ink-500: #64708C;         /* muted text on dark */
+  --ink-400: #94A0B8;         /* secondary text on dark */
+
+  /* Parchment palette — the notebook page */
+  --paper-50: #FDFBF5;        /* highest paper */
+  --paper-100: #F5F1E8;       /* primary paper */
+  --paper-200: #EBE5D5;       /* paper divider */
+  --paper-300: #D6CFB8;       /* aged edge */
+
+  /* Signal palette — hawk-iris gold is the star */
+  --iris-500: #D4A574;        /* primary accent — hawk-iris gold */
+  --iris-600: #B98A55;        /* hover/pressed gold */
+  --iris-400: #E4BC90;        /* light gold */
+  --iris-100: #F7EBD8;        /* gold-tinted paper */
+
+  /* Semantic — evidence classification */
+  --safe-500: #7FA986;        /* forest sage */
+  --safe-100: #E8F0E8;
+  --caution-500: #E8A855;     /* signal amber */
+  --caution-100: #FBEED9;
+  --threat-500: #B84A3F;      /* rust — never bright red, we're calm */
+  --threat-100: #F5E0DC;
+
+  /* Typography scale — modular, 1.25 minor third */
+  --type-xs:   0.75rem;   /* 12px  — meta, labels */
+  --type-sm:   0.875rem;  /* 14px  — secondary */
+  --type-base: 1rem;      /* 16px  — body */
+  --type-md:   1.125rem;  /* 18px  — emphasized body */
+  --type-lg:   1.4rem;    /* 22.4px — section head */
+  --type-xl:   1.75rem;   /* 28px  — display */
+  --type-2xl:  2.25rem;   /* 36px  — hero */
+
+  /* Space scale — 4px base grid */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+  --sp-7: 3rem;
+
+  /* Type families */
+  --font-display: 'Space Grotesk', ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-body: 'Inter', ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Structural */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  /* Not a soft SaaS-card shadow — an inked line, like a stamped seal */
+  --edge-subtle: 1px solid var(--paper-200);
+  --edge-strong: 1px solid var(--ink-800);
+  --edge-gold: 1px solid var(--iris-500);
+
+  --shadow-note: 0 1px 0 var(--paper-200), 0 8px 24px -12px rgba(15, 23, 41, 0.15);
+
+  /* Motion — restrained; only where confirmation matters */
+  --transition-fast: 120ms cubic-bezier(0.2, 0, 0, 1);
+  --transition-mid: 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Reset with intention */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  font-family: var(--font-body);
+  font-size: var(--type-base);
+  line-height: 1.55;
+  color: var(--ink-900);
+  background: var(--paper-100);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Google Fonts import — done in HTML head for each surface */
+
+a { color: inherit; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; text-decoration-color: var(--iris-500); }
+a:hover { text-decoration-thickness: 2px; }
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

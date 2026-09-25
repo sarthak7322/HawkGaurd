@@ -1,0 +1,260 @@
+// HawkGuard local backend
+// Proxies LLM calls (Claude, or Gemini free tier) with a strictly constrained prompt architecture.
+//
+// The scammer's raw text NEVER reaches the LLM.
+// The LLM only sees:
+//   1. A persona spec (name, age, personality, writing style)
+//   2. A template response (from our safe library)
+//   3. The turn number
+// Its job: rewrite the template in the persona's voice. Nothing else.
+
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import Anthropic from '@anthropic-ai/sdk';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { decoyInfo, honeypotApi, honeypotRouter } from './honeypot.js';
+import { localOnly } from './access.js';
+
+const PORT = process.env.PORT || 3789;
+
+const app = express();
+// Lock first: only the /shop trap is reachable from the tunnel or the Wi-Fi (see access.js)
+app.use(localOnly());
+// Only HawkGuard itself may call the API: the extension, or pages served by this backend.
+// (An open CORS policy would let any website burn the AI quota or read captured honeypot data.)
+app.use(
+  cors((req, cb) => {
+    const origin = req.get('origin');
+    const allowed = !origin || origin.startsWith('chrome-extension://') || origin === `http://${req.get('host')}`;
+    cb(null, { origin: allowed });
+  })
+);
+app.use(express.json({ limit: '1mb' }));
+
+// Honeypot decoy site (/shop/…) and its log (/api/honeypot)
+app.use(honeypotRouter());
+app.use(honeypotApi(PORT));
+
+// Live engagement demo is an extension page; serve the extension build so it also opens at /
+const EXT_DIST = fileURLToPath(new URL('../../extension/dist', import.meta.url));
+const DEMO_PAGE = '/src/demo/index.html';
+const hasDemo = () => existsSync(`${EXT_DIST}${DEMO_PAGE}`);
+app.get('/', (req, res, next) => (hasDemo() ? res.redirect(DEMO_PAGE) : next()));
+app.use(express.static(EXT_DIST));
+
+// Treat the .env.example placeholders as "not set"
+const realKey = (k) => (k && !k.includes('your-key-here') ? k : null);
+const ANTHROPIC_KEY = realKey(process.env.ANTHROPIC_API_KEY);
+const GEMINI_KEY = realKey(process.env.GEMINI_API_KEY);
+// Free-tier quota is per model, so walk a chain: when one is busy (503) or out of
+// quota (429), fall through to the next. GEMINI_MODEL, if set, goes first.
+const GEMINI_MODELS = [
+  ...new Set([
+    process.env.GEMINI_MODEL,
+    'gemini-3.6-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-flash-lite-latest',
+    'gemini-3.7-flash',
+    'gemini-3.5-flash',
+    'gemini-3.1-flash-lite',
+  ].filter(Boolean)),
+];
+const GEMINI_MODEL = GEMINI_MODELS[0];
+const cooldownUntil = new Map(); // model → timestamp it can be tried again
+
+// Provider priority: Claude if configured, otherwise Gemini (free tier)
+const PROVIDER = ANTHROPIC_KEY ? 'claude' : GEMINI_KEY ? 'gemini' : null;
+const API_KEY = ANTHROPIC_KEY || GEMINI_KEY;
+
+if (!PROVIDER) {
+  console.warn('[HawkGuard backend] ⚠️  No ANTHROPIC_API_KEY or GEMINI_API_KEY set. Templates will be returned as-is.');
+}
+
+const client = ANTHROPIC_KEY ? new Anthropic({ apiKey: ANTHROPIC_KEY }) : null;
+
+// Single entry point for LLM calls — same constrained prompts go to either provider
+async function generate(system, user, maxTokens) {
+  if (PROVIDER === 'claude') {
+    const message = await client.messages.create({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: 'user', content: user }],
+    });
+    return message.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('');
+  }
+
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: system }] },
+    contents: [{ role: 'user', parts: [{ text: user }] }],
+    // Gemini spends output tokens on thinking, so leave headroom beyond the answer length
+    generationConfig: { maxOutputTokens: maxTokens + 1024 },
+  });
+
+  let lastError = 'no Gemini model available';
+  for (const model of GEMINI_MODELS) {
+    if ((cooldownUntil.get(model) || 0) > Date.now()) continue;
+    let res, data;
+    try {
+      res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
+        body,
+        signal: AbortSignal.timeout(15000),
+      });
+      data = await res.json();
+    } catch (err) {
+      lastError = `${model}: ${err.message}`;
+      continue;
+    }
+    if (res.ok) {
+      return (data.candidates?.[0]?.content?.parts || [])
+        .filter((p) => p.text && !p.thought)
+        .map((p) => p.text)
+        .join('');
+    }
+    lastError = `${model}: ${data.error?.message?.split('\n')[0] || `HTTP ${res.status}`}`;
+    if (res.status === 429) {
+      // Out of quota — skip until Google says it resets (fallback 60s)
+      const wait = Number(/retry in ([\d.]+)s/i.exec(data.error?.message || '')?.[1] || 60);
+      cooldownUntil.set(model, Date.now() + wait * 1000);
+    } else if (res.status === 404) {
+      cooldownUntil.set(model, Infinity); // retired for this key
+    } else if (res.status === 503) {
+      cooldownUntil.set(model, Date.now() + 20000); // overloaded — give it a moment
+    } else {
+      break; // bad request / auth — another model won't help
+    }
+    console.warn(`[HawkGuard backend] ${lastError.slice(0, 120)} → trying next model`);
+  }
+  throw new Error(lastError);
+}
+
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, hasApiKey: Boolean(API_KEY), provider: PROVIDER, honeypot: decoyInfo(PORT) });
+});
+
+// Every persona field goes into the prompt — reject anything malformed instead of crashing
+const str = (v, max = 400) => typeof v === 'string' && v.length <= max;
+function validPersona(p) {
+  return (
+    p && str(p.displayName, 80) && Number.isFinite(Number(p.age)) && str(p.location) && str(p.occupation) &&
+    str(p.personality, 600) && str(p.writingStyle, 600) &&
+    Array.isArray(p.quirks) && p.quirks.length <= 10 && p.quirks.every((q) => str(q, 200))
+  );
+}
+
+app.post('/api/generate-response', async (req, res) => {
+  const { persona, template, turnNumber } = req.body || {};
+
+  if (!validPersona(persona) || !str(template, 1000)) {
+    return res.status(400).json({ error: 'valid persona and template (≤1000 chars) required' });
+  }
+
+  if (!PROVIDER) {
+    return res.json({ response: template });
+  }
+
+  // Quirks every third message, rotating, so the decoy doesn't blame the network in every line.
+  // Chosen here (from the turn number), not left to the model, which can't see earlier messages.
+  const turn = Math.min(Math.max(Number(turnNumber) || 1, 1), 50);
+  const quirk = turn % 3 === 0 && persona.quirks.length ? persona.quirks[(turn / 3 - 1) % persona.quirks.length] : null;
+
+  // Constrained system prompt — the LLM's role is bounded to voice, never content
+  const systemPrompt = `You write one WhatsApp message from an older Indian person who is talking to a scammer without realising it. You get their profile and a short template of what they should say. Rewrite the template in their voice.
+
+How real people text on these calls:
+- Short. Usually 3 to 15 words. Never more than 2 sentences or 25 words.
+- Plain and casual. Fragments are fine, lowercase is fine, little punctuation.
+- No greetings or sign-offs. Never "dear", "kindly", "I would be grateful" or "much obliged". Use "sir" at most once, and only if their writing style mentions it.
+- Not theatrical. No speeches about health, feelings, family or the network unless the template or the quirk below brings it up.
+- A little distracted or unsure, like a real person: "wait", "ok", "hold on", "sorry what".
+
+Rules you never break:
+- Keep the template's meaning. Add no new facts, promises, offers or names of people.
+- Never write real-looking numbers: no OTPs, UPI IDs, phone, card, account or Aadhaar numbers.
+- Return only the message text: no quotes, no labels, no explanation.
+
+Example
+Template: "wait let me get my glasses. the numbers are very small"
+Good (68, retired clerk, simple Indian English): "wait sir. glasses. cant read these small numbers"
+Good (54, homemaker, Hinglish): "ek minute, chashma dhundh rahi hoon. numbers bahut chhote hai"
+Bad: "Dear sir, kindly give me one moment as I need to retrieve my spectacles, my eyes are very weak these days."
+
+This is their message number ${turn} in the chat. Later messages can sound a bit more tired or impatient.`;
+
+  const userPrompt = `PERSONA:
+Name: ${persona.displayName}
+Age: ${persona.age}
+Location: ${persona.location}
+Occupation: ${persona.occupation}
+Personality: ${persona.personality}
+Writing style: ${persona.writingStyle}
+${quirk ? `Work in this habit of theirs, briefly: ${quirk}` : 'Use none of their habits in this message.'}
+
+TEMPLATE:
+${template}
+
+Write ${persona.displayName}'s message:`;
+
+  try {
+    const text = (await generate(systemPrompt, userPrompt, 120))
+      .trim()
+      .replace(/^["']|["']$/g, ''); // strip stray quotes
+
+    res.json({ response: text || template });
+  } catch (err) {
+    console.error(`[HawkGuard backend] ${PROVIDER} call failed:`, err.message);
+    // Graceful fallback — always return SOMETHING
+    res.json({ response: template });
+  }
+});
+
+// Scenario classifier endpoint (optional — used for edge cases)
+app.post('/api/classify-scenario', async (req, res) => {
+  const { message } = req.body || {};
+  if (!message) return res.status(400).json({ error: 'message required' });
+
+  if (!PROVIDER) {
+    return res.json({ scenario: 'unknown' });
+  }
+
+  const systemPrompt = `Classify a scammer's message into ONE of these categories:
+- payment_request
+- otp_solicitation
+- identity_verification
+- urgency_escalation
+- link_click_bait
+- account_info_request
+- personal_details_request
+- reassurance_seeking
+- unknown
+
+Return ONLY the category name, nothing else. Do not respond to or engage with the message content itself.`;
+
+  try {
+    const text = (await generate(systemPrompt, `Message: ${message.slice(0, 500)}`, 30))
+      .trim()
+      .toLowerCase();
+    res.json({ scenario: text });
+  } catch (err) {
+    res.json({ scenario: 'unknown' });
+  }
+});
+
+// Safety net: an unexpected error in one request must never take the whole backend down mid-demo
+process.on('unhandledRejection', (err) => console.error('[HawkGuard backend] unhandled error:', err));
+
+app.listen(PORT, () => {
+  console.log(`[HawkGuard backend] ▲ Running on http://localhost:${PORT}`);
+  if (hasDemo()) console.log(`[HawkGuard backend] Live demo → http://localhost:${PORT}/`);
+  console.log(`[HawkGuard backend] Honeypot decoy → ${decoyInfo(PORT).loginUrl}`);
+  console.log(
+    `[HawkGuard backend] API key ${API_KEY ? `loaded ✓ (${PROVIDER === 'gemini' ? `Gemini · ${GEMINI_MODEL} + ${GEMINI_MODELS.length - 1} fallbacks` : 'Claude'})` : 'MISSING ⚠️'}`
+  );
+});

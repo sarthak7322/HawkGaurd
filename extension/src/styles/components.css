@@ -1,0 +1,189 @@
+/* HawkGuard shared components — case-file aesthetic */
+
+/* ─── Buttons ─── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-display);
+  font-size: var(--type-sm);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  transition: transform var(--transition-fast), background var(--transition-fast);
+  border: var(--edge-strong);
+  background: var(--paper-50);
+  color: var(--ink-900);
+}
+.btn:hover { transform: translateY(-1px); }
+.btn:active { transform: translateY(0); }
+
+.btn-primary {
+  background: var(--ink-900);
+  color: var(--paper-50);
+  border: 1px solid var(--ink-900);
+}
+.btn-primary:hover { background: var(--ink-800); }
+
+.btn-gold {
+  background: var(--iris-500);
+  color: var(--ink-900);
+  border: 1px solid var(--iris-600);
+}
+.btn-gold:hover { background: var(--iris-600); color: var(--paper-50); }
+
+.btn-threat {
+  background: var(--threat-500);
+  color: var(--paper-50);
+  border: 1px solid var(--threat-500);
+}
+.btn-threat:hover { filter: brightness(0.92); }
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid transparent;
+}
+.btn-ghost:hover { background: var(--paper-200); }
+
+/* ─── Evidence card — the core motif ─── */
+.evidence-card {
+  background: var(--paper-50);
+  border: var(--edge-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--sp-4);
+  position: relative;
+}
+
+.evidence-card__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.evidence-card__title {
+  font-family: var(--font-display);
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--ink-900);
+  letter-spacing: 0.005em;
+}
+
+.evidence-card__body {
+  font-size: var(--type-sm);
+  color: var(--ink-800);
+  line-height: 1.6;
+}
+
+.evidence-card__meta {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--ink-500);
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px dashed var(--paper-200);
+}
+
+/* ─── Status chip — the classification stamp ─── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 3px;
+  border: 1px solid;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.chip-safe    { background: var(--safe-100);    border-color: var(--safe-500);    color: #385A3F; }
+.chip-caution { background: var(--caution-100); border-color: var(--caution-500); color: #7A5522; }
+.chip-threat  { background: var(--threat-100);  border-color: var(--threat-500);  color: #7A2E27; }
+.chip-neutral { background: var(--paper-200);   border-color: var(--paper-300);   color: var(--ink-700); }
+
+.chip__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* ─── Field label — for meta lines like an evidence tag ─── */
+.field {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px dashed var(--paper-200);
+  font-size: var(--type-sm);
+}
+.field:last-child { border-bottom: none; }
+
+.field__key {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--ink-500);
+  padding-top: 2px;
+}
+
+.field__val {
+  font-family: var(--font-body);
+  color: var(--ink-900);
+  word-break: break-word;
+}
+
+.field__val--mono {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+/* ─── Case ID / stamp element ─── */
+.case-id {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--ink-500);
+}
+
+.case-id__mark {
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--ink-500);
+  border-radius: 50%;
+  position: relative;
+}
+.case-id__mark::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  background: var(--iris-500);
+  border-radius: 50%;
+}
+
+/* ─── Divider with label — like a case section break ─── */
+.section-break {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: var(--sp-5) 0 var(--sp-4);
+}
+
+.section-break__line {
+  flex: 1;
+  height: 1px;
+  background: var(--paper-300);
+}
+
+.section-break__label {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--ink-500);
+  letter-spacing: 0.05em;
+}
