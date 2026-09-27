@@ -22,7 +22,73 @@ function extractPageText(): string {
     parts.push((n.textContent || '').trim());
     if (parts.length > 400) break;
   }
-  return parts.join(' ').slice(0, 20000);
+  // Add safe form metadata without reading user-entered values.
+const formEvidence: string[] = [];
+
+document.querySelectorAll('input, textarea, select').forEach((el) => {
+  const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+  const type = input instanceof HTMLInputElement ? input.type.toLowerCase() : '';
+  if (type === 'hidden') return;
+
+  const descriptor = [
+    type,
+    input.getAttribute('placeholder') || '',
+    input.getAttribute('aria-label') || '',
+    input.getAttribute('name') || '',
+    input.id || '',
+  ].join(' ').toLowerCase();
+
+  if (/(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan)/i.test(descriptor)) {
+    if (/password|passcode/i.test(descriptor)) {
+      formEvidence.push('Please enter your password.');
+    }
+    if (/otp|one[- ]time/i.test(descriptor)) {
+      formEvidence.push('Please enter your OTP.');
+    }
+    if (/\bpin\b/i.test(descriptor)) {
+      formEvidence.push('Please enter your PIN.');
+    }
+    if (/cvv|c\.v\.v/i.test(descriptor)) {
+      formEvidence.push('Please enter your CVV.');
+    }
+    if (/card/i.test(descriptor)) {
+      formEvidence.push('Please enter your card number.');
+    }
+    if (/account/i.test(descriptor)) {
+      formEvidence.push('Please enter your account details.');
+    }
+    if (/aadhaar/i.test(descriptor)) {
+      formEvidence.push('Please enter your Aadhaar number.');
+    }
+    if (/pan/i.test(descriptor)) {
+      formEvidence.push('Please enter your PAN number.');
+    }
+  }
+});
+
+const buttonEvidence = Array.from(
+  document.querySelectorAll('button, input[type="submit"]')
+)
+  .map((el) => (el.textContent || (el as HTMLInputElement).value || '').trim())
+  .filter(Boolean);
+
+if (buttonEvidence.length) {
+  formEvidence.push(`Form actions: ${buttonEvidence.join(' | ')}`);
+}
+  const pageTitle = document.title.trim();
+
+  const brandMetadata = Array.from(
+  document.querySelectorAll('img[alt], [aria-label]')
+)
+  .map((el) =>
+    el.getAttribute('alt') || el.getAttribute('aria-label') || ''
+  )
+  .filter(Boolean);
+
+return [pageTitle, ...parts, ...formEvidence, ...brandMetadata]
+  .filter(Boolean)
+  .join(' ')
+  .slice(0, 20000);
 }
 
 function injectBanner(analysis: ScamAnalysis) {
