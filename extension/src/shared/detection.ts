@@ -8,14 +8,93 @@
 
 import type { ForensicFinding, ScamAnalysis, Severity } from './types';
 
-const rx = (s: string) => new RegExp(s, 'i');
-const rxg = (s: string) => new RegExp(s, 'gi');
+export interface AnalysisContext {
+  referenceContent?: boolean;
+  credentialForm?: boolean;
+  links?: string[];
+  trustedCredentialSite?: boolean;
+}
 
-// Leetspeak substitutions applied only inside tokens that contain a letter, so amounts,
-// years and phone numbers ("5000", "2026", "9876543210") are left intact.
+function toAsciiHostname(hostname: string): string {
+  try {
+    return new URL(`https://${hostname}`).hostname.toLowerCase().replace(/\.$/, '');
+  } catch {
+    return hostname.toLowerCase().replace(/\.$/, '');
+  }
+}
+
+const rx = (s: string) => new RegExp(s, 'i');
+const ZERO_WIDTH_AND_FORMAT = /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]/g;
+const PUNCTUATION_MAP: Record<string, string> = {
+  '\u2010': '-', '\u2011': '-', '\u2012': '-', '\u2013': '-', '\u2014': '-', '\u2212': '-',
+  '\u2018': "'", '\u2019': "'", '\u201a': "'", '\u201c': '"', '\u201d': '"',
+  '\u2024': '.', '\u3002': '.', '\uff0e': '.', '\u00a0': ' ',
+};
+const CONFUSABLES: Record<string, string> = {
+  '\u0430': 'a', '\u03b1': 'a', '\u0435': 'e', '\u03b5': 'e', '\u043e': 'o', '\u03bf': 'o',
+  '\u0440': 'p', '\u03c1': 'p', '\u0441': 'c', '\u03f2': 'c', '\u0445': 'x', '\u03c7': 'x',
+  '\u0456': 'i', '\u03b9': 'i', '\u0458': 'j', '\u043a': 'k', '\u03ba': 'k',
+  '\u043c': 'm', '\u03bc': 'm', '\u0442': 't', '\u03c4': 't', '\u0443': 'y', '\u03c5': 'y',
+  '\u0432': 'b', '\u03b2': 'b', '\u043d': 'h', '\u0433': 'r',
+};
 const LEET: Record<string, string> = { '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't', '8': 'b', '@': 'a', '$': 's' };
+const OBFUSCATED_WORDS = new Set([
+  'otp', 'pin', 'pay', 'password', 'passcode', 'verify', 'account', 'login', 'secure',
+  'suspend', 'blocked', 'confirm', 'payment', 'refund', 'bank', 'wallet', 'urgent',
+  'recovery', 'backup', 'code', 'kyc', 'share', 'send', 'access', 'approve',
+]);
+
+export function normalizeUnicode(text: string): string {
+  return text.normalize('NFKC')
+    .replace(ZERO_WIDTH_AND_FORMAT, '')
+    .replace(/([A-Za-z])[\u200c\u200d]+(?=[A-Za-z])/g, '$1')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/[\u2010-\u2015\u2212\u2024\u3002\uff0e\u2018-\u201f\u00a0]/g, (char) => PUNCTUATION_MAP[char] ?? char)
+    .replace(/[^\S\n]+/g, ' ')
+    .split('\n')
+    .map((line) => line.trim())
+    .join('\n');
+}
+
+function normalizeSpacedWords(text: string): string {
+  return text.replace(/\b([a-z])(?:[ \t._\-']+([a-z])){1,}\b/gi, (match) => {
+    const joined = match.replace(/[\s._\-']/g, '').toLowerCase();
+    return OBFUSCATED_WORDS.has(joined) ? joined : match;
+  });
+}
+
 function deobfuscate(text: string): string {
-  return text.split(/(\s+)/).map((tok) => (/[a-z]/i.test(tok) && /[013457@$8]/.test(tok) ? tok.replace(/[013457@$8]/g, (c) => LEET[c] ?? c) : tok)).join('');
+  const normalized = normalizeSpacedWords(normalizeUnicode(text));
+  return normalized.replace(/[a-z0-9@$]+/gi, (token) => {
+    if (!/[a-z]/i.test(token) || !/[013457@$8]/.test(token)) return token;
+    const decoded = token.toLowerCase().replace(/[013457@$8]/g, (char) => LEET[char] ?? char);
+    return OBFUSCATED_WORDS.has(decoded) ? decoded : token;
+  });
+}
+
+function normalizeConfusables(text: string): string {
+  return text.split(/(\s+)/).map((token) => {
+    if (!hasMixedScriptToken(token)) return token;
+    return token.replace(/[\u0430\u03b1\u0435\u03b5\u043e\u03bf\u0440\u03c1\u0441\u03f2\u0445\u03c7\u0456\u03b9\u0458\u043a\u03ba\u043c\u03bc\u0442\u03c4\u0443\u0432\u03b2\u043d\u0433]/gi,
+      (char) => CONFUSABLES[char.toLowerCase()] ?? char);
+  }).join('');
+}
+
+function hasMixedScriptToken(text: string): boolean {
+  return text.split(/[\s/.:_-]+/).some((token) => {
+    let latin = false;
+    let nonLatin = false;
+    for (const char of token) {
+      if (/\p{Script=Latin}/u.test(char)) latin = true;
+      else if (/\p{Letter}/u.test(char)) nonLatin = true;
+    }
+    return latin && nonLatin && token.length >= 4;
+  });
+}
+
+function detectionText(text: string): string {
+  return deobfuscate(normalizeConfusables(text));
 }
 
 // ── Building blocks ──────────────────────────────────────────
@@ -26,7 +105,7 @@ const CRED = '(?:otp|one[\\s-]?time[\\s-]?password|cvv|c\\.v\\.v|\\bpin\\b|mpin|
 interface Cat { key: string; title: string; detail: string; severity: Severity; weight: number; res: RegExp[]; }
 const CATEGORIES: Cat[] = [
   {
-    key: 'credential', title: 'Credential solicitation', severity: 'threat', weight: 35,
+    key: 'credential', title: 'Credential solicitation', severity: 'threat', weight: 40,
     detail: 'Asks you to share an OTP, PIN, CVV, password, Aadhaar or card details. No legitimate service asks for these.',
     res: [
       rx(`${ASK}(?:\\s+(?:me|us|your|the|us\\s+your))?[^.?!\\n]{0,30}${CRED}`),
@@ -34,18 +113,77 @@ const CATEGORIES: Cat[] = [
     ],
   },
   {
-  key: 'payment', title: 'Payment demand', severity: 'threat', weight: 25,
+    key: 'oauth', title: 'Suspicious authorization request', severity: 'caution', weight: 24,
+    detail: 'An authorization or app-permission prompt is paired with an account action or pressure to continue.',
+    res: [
+      rx('(?:grant|allow|approve|authorize)[^.?!\\n]{0,45}(?:unknown|untrusted|unverified|third[ -]?party|external|suspicious|malicious)[^.?!\\n]{0,25}(?:app|application)[^.?!\\n]{0,50}(?:access|permission)[^.?!\\n]{0,40}(?:account|email|drive|files|data)'),
+      rx('(?:grant|allow|approve|authorize)[^.?!\\n]{0,45}(?:app|application)[^.?!\\n]{0,60}(?:access|permission|account)[^.?!\\n]{0,60}(?:password|otp|recovery\\s+code|credentials|suspend|blocked|urgent|immediately|within\\s+\\d+)'),
+    ],
+  },
+  {
+    key: 'recovery_code', title: 'Recovery-code theft', severity: 'threat', weight: 40,
+    detail: 'Requests a backup or recovery code, which can be used to take over an account.',
+    res: [
+      rx(`${ASK}[^.?!\\n]{0,40}(?:recovery|backup|authentication)\\s*code`),
+      rx('(?:send|provide|give|share|read\\s*out)[^.?!\\n]{0,30}(?:your\\s+)?(?:backup|recovery)\\s*code'),
+    ],
+  },
+  {
+    key: 'mfa_approval', title: 'Authentication approval pressure', severity: 'caution', weight: 25,
+    detail: 'Pressures you to approve or confirm an authentication request, especially one you did not initiate.',
+    res: [
+      rx('(?:approve|confirm|accept)[^.?!\\n]{0,35}(?:this\\s+)?(?:sign[ -]?in|login|authentication|mfa|push\\s+request)[^.?!\\n]{0,55}(?:or|otherwise|not\\s+you|did\\s+not\\s+initiate|blocked|suspend|urgent)'),
+      rx('(?:repeated|multiple|several)[^.?!\\n]{0,35}(?:sign[ -]?in|login|mfa|authentication)[^.?!\\n]{0,35}(?:approve|confirm|request|prompt)'),
+      rx('(?:approve|confirm|accept)[^.?!\\n]{0,25}(?:sign[ -]?in|login|mfa|authentication)[^.?!\\n]{0,20}(?:immediately|now|within\\s+\\d+\\s+minutes?)'),
+    ],
+  },
+  {
+    key: 'fake_captcha', title: 'Suspicious CAPTCHA verification', severity: 'threat', weight: 40,
+    detail: 'A human-verification prompt is used to trigger a download, run a command, or disclose credentials.',
+    res: [
+      rx('(?:captcha|verify\\s+you(?:\\s+are|\\x27re)\\s+human)[^.?!\\n]{0,100}(?:download|install|run\\s+(?:this|the)|paste\\s+(?:this|the)|press\\s+win\\s*\\+\\s*r|open\\s+(?:powershell|terminal)|enter\\s+(?:your\\s+)?(?:password|otp|code))'),
+    ],
+  },
+  {
+    key: 'shared_document_login', title: 'Shared-document credential bait', severity: 'threat', weight: 40,
+    detail: 'A shared file or invoice is paired with an unexpected sign-in or credential request.',
+    res: [
+      rx('(?:shared|sent|invited you to view|received)[^.?!\\n]{0,50}(?:document|file|invoice|voicemail|sharepoint|onedrive|drive)[^.?!\\n]{0,70}(?:sign[ -]?in|log[ -]?in|verify|enter\\s+(?:your\\s+)?(?:email|password|otp)|credentials)'),
+      rx('(?:document|invoice|sharepoint|onedrive|google\\s+drive)[^.?!\\n]{0,45}(?:requires?|need)[^.?!\\n]{0,25}(?:sign[ -]?in|log[ -]?in|password|otp|verify\\s+your\\s+account)'),
+    ],
+  },
+  {
+    key: 'callback', title: 'Suspicious callback request', severity: 'caution', weight: 28,
+    detail: 'Uses an urgent account or payment claim to direct you to an unverified support number.',
+    res: [
+      rx('(?:call|dial|phone)[^.?!\\n]{0,40}(?:\\+?\\d[\\d ()-]{7,}\\d)[^.?!\\n]{0,80}(?:cancel|dispute|refund|charge|payment|account|blocked|suspend|urgent|immediately)'),
+      rx('(?:unauthorized|suspicious|unknown)[^.?!\\n]{0,25}(?:charge|payment|debit)[^.?!\\n]{0,70}(?:call|dial|contact)[^.?!\\n]{0,35}(?:support|agent|number|\\d{7,})'),
+    ],
+  },
+  {
+    key: 'qr_payment', title: 'QR-code payment deception', severity: 'threat', weight: 40,
+    detail: 'Pairs scanning a QR code with receiving a refund/payment or with account verification and sensitive details.',
+    res: [
+      rx('(?:scan|use)[^.?!\\n]{0,30}(?:qr\\s*(?:code)?)[^.?!\\n]{0,70}(?:receive|get|claim|collect)[^.?!\\n]{0,35}(?:refund|money|payment|cashback|prize)'),
+      rx('(?:scan|use)[^.?!\\n]{0,30}qr\\s*(?:code)?[^.?!\\n]{0,70}(?:verify|unlock|reactivate|receive\\s+money|refund)[^.?!\\n]{0,50}(?:otp|pin|payment|account|bank)?'),
+    ],
+  },
+  {
+  key: 'payment', title: 'Payment demand', severity: 'threat', weight: 40,
   detail: 'Pressures you to pay, transfer or send money — especially when tied to a fee, penalty, threat, reward or account action.',
   res: [
+  rx('\\b(?:pay|send|transfer|deposit|remit)\\b[^.?!\\n]{0,60}(?:processing|registration|verification|clearance|security|activation|customs?)\\s+(?:fee|charge|deposit)[^.?!\\n]{0,70}(?:refund|receive|claim|withdraw|unlock|release|reward|prize|job|investment|parcel|account)'),
+  rx('(?:processing|registration|security|activation|withdrawal|training|customs?)\\s+(?:fee|charge|deposit)[^.?!\\n]{0,70}(?:pay|transfer|send|receive|refund|withdraw|unlock|job|investment|parcel|account)'),
   rx('\\b(?:pay|send|transfer|deposit|remit)\\b[^.?!\\n]{0,30}(?:₹|rs\\.?|inr)\\s*\\d{2,}[^.?!\\n]{0,30}(?:claim|receive|unlock|release|avoid|verify|reactivate|refund|reward|prize|penalty|fine|fee|charge)'),
-  rx('(?:processing|registration|verification|clearance|refundable|security|activation|penalty|fine|customs?)\\s+(?:fee|charge|deposit|amount)'),
   ],
 },
   {
     key: 'digital_arrest', title: '"Digital arrest" / courier fraud', severity: 'threat', weight: 40,
     detail: 'Classic "digital arrest" script: a fake courier or officer claims your parcel or identity is linked to a crime.',
     res: [
-      rx('digital\\s+arrest'), rx('under\\s+(?:digital\\s+)?arrest'), rx('do\\s*n[o\']?t\\s+disconnect'),
+      rx('digital\\s+arrest[^.?!\\n]{0,45}(?:police|cbi|customs|officer|video\\s*call|arrest|crime|money|account|transfer|do\\s*n[o\']?t\\s+disconnect)'),
+      rx('under\\s+(?:digital\\s+)?arrest[^.?!\\n]{0,35}(?:police|officer|court|crime|money|account|transfer)'),
+      rx('do\\s*n[o\']?t\\s+disconnect[^.?!\\n]{0,45}(?:police|officer|arrest|crime|video|call|money)'),
       rx('(?:parcel|courier|package|consignment|shipment)[^.?!\\n]{0,40}(?:drugs?|illegal|passport|arrest|seized|customs|narcotic|money\\s*launder)'),
       rx('(?:fedex|dhl|blue\\s*dart|dtdc|indian\\s*post|customs)[^.?!\\n]{0,40}(?:illegal|drugs?|arrest|seized|detain|narcotic)'),
     ],
@@ -55,15 +193,16 @@ const CATEGORIES: Cat[] = [
     detail: 'Tells you that you won a lottery, prize or lucky draw — then asks for a fee or details to "release" it.',
     res: [
       rx('(?:won|winner|winning|selected|lucky\\s*winner)[^.?!\\n]{0,35}(?:lottery|prize|lakh|crore|rs\\.?|₹|inr|lucky\\s*draw|reward|gift|kbc|jackpot|bumper)'),
-      rx('\\b(?:kbc|kaun\\s*banega|lucky\\s*draw|jackpot|bumper\\s*(?:prize|offer)|lottery\\s*(?:winner|number))\\b'),
+      rx('\\b(?:kbc|kaun\\s*banega|lucky\\s*draw|jackpot|bumper\\s*(?:prize|offer)|lottery\\s*(?:winner|number))\\b[^.?!\\n]{0,50}(?:won|winner|selected|claim|fee|pay|send|prize|reward|account|bank)'),
       rx('congratulation[^.?!\\n]{0,40}(?:won|winner|selected|prize|lottery|lucky|reward)'),
     ],
   },
   {
-    key: 'remote_access', title: 'Remote-access tool', severity: 'threat', weight: 34,
+    key: 'remote_access', title: 'Remote-access tool', severity: 'threat', weight: 40,
     detail: 'Wants you to install screen-sharing or remote-control software, which hands over your device.',
     res: [
-      rx('\\b(?:any\\s*desk|anydesk|team\\s*viewer|teamviewer|quick\\s*support|quicksupport|rustdesk|screen[\\s-]?shar|remote\\s+(?:access|control|assistance|desktop))\\b'),
+      rx('(?:install|download|open|connect|share|grant|give)[^.?!\\n]{0,40}\\b(?:any\\s*desk|anydesk|team\\s*viewer|teamviewer|quick\\s*support|quicksupport|rustdesk|screen[\\s-]?shar|remote\\s+(?:access|control|assistance|desktop))\\b'),
+      rx('\\b(?:any\\s*desk|anydesk|team\\s*viewer|teamviewer|quick\\s*support|quicksupport|rustdesk)\\b[^.?!\\n]{0,50}(?:install|download|connect|share\\s+(?:your\\s+)?screen|grant\\s+(?:access|permission))'),
       rx('install[^.?!\\n]{0,30}(?:app|application|software|apk)[^.?!\\n]{0,30}(?:bank|fix|help|resolve|support|verify|update)'),
     ],
   },
@@ -71,17 +210,17 @@ const CATEGORIES: Cat[] = [
     key: 'investment', title: 'Investment / crypto scam', severity: 'threat', weight: 28,
     detail: 'Promises guaranteed or unrealistic returns — a hallmark of investment and crypto fraud.',
     res: [
-      rx('(?:guaranteed|assured|fixed|100%)[^.?!\\n]{0,20}(?:returns?|profit|income|doubl)'),
-      rx('(?:double|triple|2x|3x)[^.?!\\n]{0,15}(?:your\\s+)?(?:money|investment|amount|capital)'),
-      rx('\\d{2,3}\\s*%[^.?!\\n]{0,20}(?:return|profit|monthly|weekly|daily|guaranteed)'),
-      rx('\\b(?:usdt|bitcoin|btc|crypto|forex|trading\\s*account)\\b[^.?!\\n]{0,30}(?:invest|profit|return|deposit|wallet|double)'),
+      rx('(?:guaranteed|assured|fixed|100%)[^.?!\\n]{0,20}(?:returns?|profit|income|doubl)[^.?!\\n]{0,60}(?:invest|deposit|send|transfer|wallet|withdrawal|limited\\s+time)'),
+      rx('(?:double|triple|2x|3x)[^.?!\\n]{0,15}(?:your\\s+)?(?:money|investment|amount|capital)[^.?!\\n]{0,50}(?:invest|deposit|send|transfer|wallet|limited\\s+time)'),
+      rx('\\d{2,3}\\s*%[^.?!\\n]{0,30}(?:return|profit|monthly|weekly|daily|guaranteed)[^.?!\\n]{0,55}(?:invest|deposit|send|transfer|wallet|withdrawal)'),
+      rx('\\b(?:usdt|bitcoin|btc|crypto|forex|trading\\s*account)\\b[^.?!\\n]{0,45}(?:invest|profit|return)[^.?!\\n]{0,40}(?:deposit|send|transfer|wallet|withdrawal)'),
     ],
   },
   {
     key: 'job', title: 'Fake job / task scam', severity: 'caution', weight: 22,
     detail: 'Work-from-home or "like and earn" task offers are a common front for advance-fee and money-mule scams.',
     res: [
-      rx('(?:part[\\s-]?time|work\\s+from\\s+home|online|home[\\s-]?based)\\s+job'),
+      rx('(?:part[\\s-]?time|work\\s+from\\s+home|online|home[\\s-]?based)\\s+job[^.?!\\n]{0,70}(?:registration\\s+fee|training\\s+fee|security\\s+deposit|pay\\s+to\\s+start|telegram|whatsapp|like\\s+and\\s+earn)'),
       rx('earn[^.?!\\n]{0,20}(?:rs\\.?|₹|inr|\\d{3,})[^.?!\\n]{0,12}(?:per\\s*day|/\\s*day|daily|per\\s*task|weekly|from\\s*home)'),
       rx('(?:like|subscribe|rate|review|complete)[^.?!\\n]{0,20}(?:videos?|youtube|tasks?|hotels?|apps?)[^.?!\\n]{0,25}(?:earn|paid|money|salary|telegram|whatsapp)'),
     ],
@@ -90,30 +229,32 @@ const CATEGORIES: Cat[] = [
     key: 'refund', title: 'Fake refund / cashback bait', severity: 'caution', weight: 22,
     detail: 'A "pending refund" or "cashback" you must claim through a link is a common phishing hook.',
     res: [
-      rx('(?:pending|claim\\s*(?:your)?|get\\s*(?:your)?)\\s*(?:refund|cashback)'),
-      rx('(?:refund|cashback)[^.?!\\n]{0,20}(?:click|claim|link|verify|expire|pending)'),
+      rx('(?:pending|claim\\s*(?:your)?|get\\s*(?:your)?)\\s*(?:refund|cashback)[^.?!\\n]{0,65}(?:pay|fee|charge|deposit|otp|pin|password|click|link|verify|account)'),
+      rx('(?:refund|cashback)[^.?!\\n]{0,35}(?:pay|fee|charge|deposit|otp|pin|password|click|claim|link|verify|expire|pending)'),
+      rx('(?:pay|send|transfer)[^.?!\\n]{0,40}(?:fee|charge|deposit)[^.?!\\n]{0,55}(?:refund|cashback|claim your refund)'),
     ],
   },
   {
     key: 'family', title: 'Family-impersonation scam', severity: 'caution', weight: 24,
     detail: 'A "new number" from a relative asking for urgent money is a widespread impersonation scam.',
     res: [
-      rx('\\b(?:hi|hello|hey)\\s+(?:mom|mum|mummy|dad|papa|beta|son|uncle|aunty)\\b'),
-      rx('(?:this\\s+is\\s+my\\s+new\\s+number|new\\s+number|changed\\s+my\\s+number|lost\\s+my\\s+phone|phone\\s+(?:broke|is\\s+broken|got\\s+damaged|not\\s+working))'),
+      rx('\\b(?:hi|hello|hey)\\s+(?:mom|mum|mummy|dad|papa|beta|son|uncle|aunty)\\b[^\\n]{0,100}(?:send|transfer|pay)[^\\n]{0,45}(?:money|₹|rs\\.?|\\d{3,}|hospital|accident|emergency)'),
+      rx('(?:this\\s+is\\s+my\\s+new\\s+number|new\\s+number|changed\\s+my\\s+number|lost\\s+my\\s+phone|phone\\s+(?:broke|is\\s+broken|got\\s+damaged|not\\s+working))[^\\n]{0,100}(?:send|transfer|pay)[^\\n]{0,45}(?:money|₹|rs\\.?|\\d{3,}|hospital|accident|emergency)'),
     ],
   },
   {
     key: 'utility', title: 'Utility disconnection scam', severity: 'caution', weight: 26,
     detail: 'Threats to cut electricity, gas or a SIM unless you act immediately are a common pressure scam.',
     res: [
-      rx('(?:electricity|power|gas|sim\\s*card)[^.?!\\n]{0,30}(?:disconnect|will\\s+be\\s+(?:cut|disconnected|deactivated|blocked)|deactivat)'),
+      rx('(?:electricity|power|gas|sim\\s*card)[^.?!\\n]{0,30}(?:disconnect|will\\s+be\\s+(?:cut|disconnected|deactivated|blocked)|deactivat)[^.?!\\n]{0,100}(?:pay|immediately|urgent|within\\s+\\d+|click|update)'),
+      rx('(?:electricity|power|gas|sim\\s*card)[^.?!\\n]{0,35}(?:disconnect|will\\s+be\\s+(?:cut|disconnected|deactivated|blocked)|deactivat)[^\\n]{0,100}(?:pay|immediately|urgent|within\\s+\\d+|click|update)'),
     ],
   },
   {
     key: 'account_threat', title: 'Account block/expiry threat', severity: 'caution', weight: 20,
     detail: 'Warns that your account, card or KYC is blocked or expired to pressure you into acting.',
     res: [
-      rx('(?:account|a/c|card|kyc|pan|aadhaar|wallet|sim)\\b[^.?!\\n]{0,25}(?:is|are|has\\s+been|will\\s+be)?[^.?!\\n]{0,10}(?:blocked|suspend|frozen|deactivat|expired|on\\s+hold|closed|de-?activat)'),
+      rx('(?:account|a/c|card|kyc|pan|aadhaar|wallet|sim)\\b[^.?!\\n]{0,25}(?:is|are|has\\s+been|will\\s+be)?[^.?!\\n]{0,10}(?:blocked|suspend|frozen|deactivat|expired|on\\s+hold|closed|de-?activat)[^.?!\\n]{0,55}(?:update|verify|click|call|contact|immediately|urgent|within\\s+\\d+|otp|password)'),
     ],
   },
   {
@@ -121,10 +262,23 @@ const CATEGORIES: Cat[] = [
     detail: 'Urges you to click a link to verify, claim or update — the delivery mechanism for most phishing.',
     res: [
   rx('(?:click|tap|open|visit)[^.?!\\n]{0,20}(?:here|this\\s+link|the\\s+link|below)[^.?!\\n]{0,35}(?:verify|update|claim|login|log\s*in|kyc|refund|account)'),
-  rx('(?:https?://|www\\.)[^\\s/]+(?:/[^\\s?]*)?(?:verify|update|claim|login|log[-_]?in|kyc|refund|payment|account)[^\\s]*'),
 ],
   },
 ];
+
+const REFERENCE_CUES = [
+  /\b(?:how to (?:spot|identify|avoid|report|recognize)|protect yourself from|scam awareness|fraud awareness|phishing awareness|security advisory|security research|training material|educational resource|scam[- ]?(?:detection|classifier|scenario|playbook))\b/i,
+  /\b(?:awareness|security|safety)\s+(?:guide|article|training|resource)\b/i,
+  /\b(?:scam|fraud|phishing)\s+(?:examples?|patterns?|indicators?|tactics?|scripts?|warnings?)\b/i,
+  /\b(?:this|the)\s+(?:article|guide|document|report|repository|project)\s+(?:explains?|describes?|documents?|demonstrates?|contains?)\b/i,
+];
+const REFERENCE_TERMS = /\b(?:article|guide|documentation|docs|research|tutorial|awareness|training|educational|examples?|sample|repository|source code|security report|warning|advisory)\b/gi;
+
+export function isReferenceContent(text: string): boolean {
+  if (REFERENCE_CUES.some((pattern) => pattern.test(text))) return true;
+  const terms = text.match(REFERENCE_TERMS)?.length ?? 0;
+  return terms >= 3 && /\b(?:scam|fraud|phishing|security|credential|otp)\b/i.test(text);
+}
 
 // Negative signals — legitimate messages that share keywords with scams.
 const NEGATIVE: { key: string; re: RegExp; weight: number }[] = [
@@ -158,9 +312,9 @@ const BRANDS = [
 // Extract intel patterns
 export const INTEL_PATTERNS = {
   upi: /[a-zA-Z0-9._-]{2,}@[a-zA-Z]{2,15}/g,
-  phone: /(?:\+91[-\s]?|\b0)?[6-9]\d{9}\b/g,
-  url: /https?:\/\/[^\s"'<>]+|\bwww\.[^\s"'<>]+/gi,
-  bankAccount: /\b\d{9,18}\b/g,
+  phone: /(?<!\d)(?:\+91[-\s]?|0)?[6-9]\d{9}(?!\d)/g,
+  url: /(?:https?(?::|%3a)(?:\/|%2f){2}|(?:https?:)?\/\/)[^\s"'<>]+|\bwww\.[^\s"'<>]+/gi,
+  bankAccount: /(?<!\d)\d{9,18}(?!\d)/g,
   email: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
 };
 
@@ -175,10 +329,13 @@ function countHits(patterns: RegExp[], text: string): number {
   return patterns.reduce((n, p) => n + (p.test(text) ? 1 : 0), 0);
 }
 
-export function analyzeContent(text: string): { score: number; findings: ForensicFinding[]; reasons: string[] } {
+export function analyzeContent(text: string, context: AnalysisContext = {}): { score: number; findings: ForensicFinding[]; reasons: string[] } {
   const findings: ForensicFinding[] = [];
   const reasons: string[] = [];
-  const deob = deobfuscate(text);
+  const normalizedOriginal = normalizeUnicode(text);
+  const normalized = detectionText(normalizedOriginal);
+  const deob = normalized;
+  const referenceContent = context.referenceContent ?? isReferenceContent(normalized);
   let score = 0;
   const finding = (category: ForensicFinding['category'], title: string, severity: Severity, detail: string, evidence: Record<string, string | number>) =>
     findings.push({ id: crypto.randomUUID(), category, title, severity, detail, evidence, timestamp: Date.now() });
@@ -186,24 +343,28 @@ export function analyzeContent(text: string): { score: number; findings: Forensi
   // Negative signals first (legitimate-message markers)
   let credit = 0;
   const neg = new Set<string>();
-  for (const n of NEGATIVE) if (n.re.test(text)) { credit += n.weight; neg.add(n.key); }
-  const advisory = neg.has('advisory');
+  for (const n of NEGATIVE) if (n.re.test(normalized)) { credit += n.weight; neg.add(n.key); }
   const otpDelivery = neg.has('otp_delivery') || neg.has('otp_delivery2');
 
   // Positive categories
   for (const c of CATEGORIES) {
     // An OTP-delivery message ("your OTP is 1234") must not count as credential solicitation
     if (c.key === 'credential' && otpDelivery) continue;
-    const { hit, example } = anyHit(c.res, text, deob);
+    const routineCredentialEntry = c.key === 'credential'
+      && context.trustedCredentialSite
+      && /(?:enter|submit|type|input|provide|update)[^.?!\n]{0,35}(?:otp|one[\s-]?time|cvv|pin|password|passcode|kyc|aadhaar|card\s*(?:number|details)|account\s*(?:number|details))/i.test(deob);
+    const credentialTransfer = /(?:share|send|give|tell|read\s*out|reply\s*with)[^.?!\n]{0,45}(?:otp|one[\s-]?time|cvv|pin|password|passcode|kyc|aadhaar|card\s*(?:number|details)|account\s*(?:number|details))/i.test(deob);
+    if (routineCredentialEntry && !credentialTransfer) continue;
+    const { hit } = anyHit(c.res, normalized, deob);
     if (hit) {
       score += c.weight;
       reasons.push(c.title);
-      finding('content', c.title, c.severity, c.detail, { match: example });
+      finding('content', c.title, c.severity, c.detail, { signal: c.key });
     }
   }
 
   // Urgency (supporting signal)
-  const urgencyCount = countHits(URGENCY, text) + countHits(URGENCY, deob);
+  const urgencyCount = countHits(URGENCY, normalized);
   if (urgencyCount > 0) {
     score += Math.min(urgencyCount * 2, 6);
     reasons.push(`Urgency / time pressure (${urgencyCount})`);
@@ -213,7 +374,8 @@ export function analyzeContent(text: string): { score: number; findings: Forensi
   // Strong combination: credential collection + account threat is much more
   // suspicious than either signal alone.
   const hasCredential = findings.some((f) => f.title === 'Credential solicitation');
-  const hasAccountThreat = findings.some((f) => f.title === 'Account block/expiry threat');
+  const hasAccountThreat = findings.some((f) => f.title === 'Account block/expiry threat')
+    || (hasCredential && /(?:account|a\/c|card|kyc|wallet|sim)[^.?!\n]{0,55}(?:blocked|suspend|frozen|deactivat|expired|on\s+hold|closed)/i.test(normalized));
 
   if (hasCredential && hasAccountThreat) {
     score += 20;
@@ -226,73 +388,100 @@ export function analyzeContent(text: string): { score: number; findings: Forensi
       { combination: 'credential + account threat' }
     );
   }
-  // Sensitive term under pressure, incl. Hindi/Hinglish (catches non-English asks like "OTP बताएं")
-  // if (!findings.some((f) => f.title === 'Credential solicitation') && !otpDelivery && !neg.has('disclaimer') && SENSITIVE_TERM.test(text) && (urgencyCount > 0 || HAS_DEVANAGARI.test(text))) {
-  //   score += 20;
-  //   reasons.push('Sensitive credential requested under pressure');
-  //   finding('content', 'Credential solicitation', 'threat',
-  //     'A message pushes for an OTP / PIN / KYC alongside urgency — a hallmark of phishing.', { term: (text.match(SENSITIVE_TERM) || [''])[0] });
-  // }
-
-
   // Authority impersonation — only counts alongside a threat/pressure signal, so a neutral
   // "Income Tax Dept: your ITR was processed" doesn't get flagged.
-  const authority = anyHit(AUTHORITY, text, deob);
+  const authority = anyHit(AUTHORITY, normalized, deob);
   if (authority.hit && (score > 0 || urgencyCount > 0)) {
     score += 18;
-    reasons.push(`Authority impersonation (${authority.example})`);
+    reasons.push('Authority impersonation');
     finding('content', 'Impersonation of authority', 'threat',
-      'Invokes a government body or regulator to intimidate — legitimate agencies do not demand money or codes over chat.', { match: authority.example });
+      'Invokes a government body or regulator to intimidate — legitimate agencies do not demand money or codes over chat.', { signal: 'authority-mention' });
   }
 
   // Brand impersonation — only alongside credential/payment/link activity
-  const brand = anyHit(BRANDS, text, deob);
-  const activity = findings.some((f) => ['Credential solicitation', 'Payment demand', 'Click-the-link bait', 'Fake refund / cashback bait'].includes(f.title));
+  const brand = anyHit(BRANDS, normalized, deob);
+  const activity = findings.some((f) => ['Credential solicitation', 'Payment demand', 'Click-the-link bait', 'Fake refund / cashback bait', 'Recovery-code theft', 'Suspicious authorization request', 'Shared-document credential bait'].includes(f.title));
   if (brand.hit && activity) {
     score += 10;
     reasons.push('Impersonated brand + suspicious activity');
     finding('content', 'Brand impersonation', 'threat', 'References a well-known brand next to a credential, payment or link request.', { brand: brand.example });
   }
 
-  // Obfuscated / leetspeak text (e.g. "0TP", "y0ur acc0unt susp3nded")
-    // Obfuscated scam-related words only
-  if (deob !== text) {
-    const leetWords = (text.match(/\b\w*[013457@]\w*\b/gi) || [])
-      .filter((w) => /[a-z]/i.test(w))
-      .filter((w) => {
-        const normalized = w
-          .toLowerCase()
-          .replace(/0/g, 'o')
-          .replace(/1/g, 'i')
-          .replace(/3/g, 'e')
-          .replace(/4/g, 'a')
-          .replace(/5/g, 's')
-          .replace(/7/g, 't')
-          .replace(/@/g, 'a');
-
-        return /(otp|account|verify|password|passcode|login|secure|suspend|blocked|confirm|payment|refund|bank|wallet|urgent)/i.test(normalized);
-      });
-
-    if (leetWords.length >= 1) {
-      score += 10;
-      reasons.push('Obfuscated (leetspeak) text');
-      finding(
-        'content',
-        'Character-substituted text',
-        'caution',
-        'Scam-related words appear disguised with character substitutions.',
-        { examples: leetWords.slice(0, 4).join(', ') }
-      );
+  const directSensitiveAsk = normalized.split(/[.?!\n]+/).some((sentence) => {
+    const requestPattern = /(?:share|send|give|tell|provide|enter|submit|read\s*out|reply\s*with|बताएं|भेजें|डालें|साझा|दर्ज)[^.?!\n]{0,45}(?:otp|one[\s-]?time|pin|cvv|password|kyc|aadhaar|खाता|ओटीपी)/gi;
+    let match: RegExpExecArray | null;
+    while ((match = requestPattern.exec(sentence))) {
+      const preceding = sentence.slice(Math.max(0, match.index - 35), match.index);
+      if (!/(?:never|don't|do\s+not|dont)\s*$/i.test(preceding)) return true;
     }
+    return false;
+  });
+  const separateExplicitRequest = /\bbut\b[^.?!\n]{0,20}(?:send|give|tell|provide|submit|read\s*out|reply\s*with|share)[^.?!\n]{0,45}(?:otp|one[\s-]?time|pin|cvv|password|kyc|aadhaar|account)/i.test(normalized);
+  const unambiguousSensitiveTransfer = /\b(?:send|give|provide|tell|read\s*out|reply\s*with)\b[^.?!\n]{0,45}(?:otp|one[\s-]?time|pin|cvv|password|kyc|aadhaar|account|recovery\s*code|backup\s*code)/i.test(normalized);
+  const hasActiveSensitiveAsk = directSensitiveAsk || separateExplicitRequest || unambiguousSensitiveTransfer;
+  const hasUnquotedSensitiveRequest = normalized.split(/[.?!\n]+/).some((sentence) => {
+    const explanatoryContext = /\b(?:example|sample|quote|scammers?|attackers?|criminals?|fraudsters?)\b/i.test(sentence);
+    return !explanatoryContext && /(?:share|send|give|tell|provide|enter|submit|read\s*out|reply\s*with)\b[^.?!\n]{0,45}(?:otp|one[\s-]?time|pin|cvv|password|kyc|aadhaar|account|recovery\s*code|backup\s*code)/i.test(sentence);
+  });
+  const explicitWarning = /\b(?:never|do\s+not|don't|dont)\s+(?:share|disclose|reveal|give|send)\b[^.?!\n]{0,45}\b(?:otp|pin|cvv|password|code|card|kyc|bank|details)\b/i.test(normalized)
+    || /\b(?:warns?|warning|advisory|beware|awareness|protect yourself)\b[^.?!\n]{0,90}\b(?:fraud|scam|phishing|otp|pin|kyc)\b/i.test(normalized);
+  if (explicitWarning && !hasActiveSensitiveAsk) {
+    score = 0;
+    findings.length = 0;
+    reasons.length = 0;
+  } else if (referenceContent && !hasUnquotedSensitiveRequest) {
+    if (!context.credentialForm) {
+      score = 0;
+      findings.length = 0;
+      reasons.length = 0;
+    } else {
+      score = Math.round(score * 0.35);
+    }
+  } else {
+    score = Math.max(0, score - (hasActiveSensitiveAsk ? 0 : Math.min(credit, 25)));
+  }
+  if (score === 0) {
+    findings.length = 0;
+    reasons.length = 0;
   }
 
-  score = Math.max(0, score - credit);
+  // Hindi/Hinglish solicitations combine the sensitive term with a request verb rather
+  // than English word order; the ordinary category patterns don't cover those inflections.
+  if (!referenceContent && (!explicitWarning || hasActiveSensitiveAsk) && HAS_DEVANAGARI.test(normalized) && SENSITIVE_TERM.test(deob) && /(?:बताएं|बताओ|भेजें|भेजो|डालें|डालो|साझा|दर्ज|अपडेट\s*करें|करें)/.test(normalized) && !findings.some((f) => f.title === 'Credential solicitation')) {
+    score += 40;
+    reasons.push('Credential solicitation');
+    finding('content', 'Credential solicitation', 'threat',
+      'Requests a sensitive code or account detail in Hindi/Hinglish.', { signal: 'localized-credential-request' });
+  }
+  const detectionLines = normalized.split('\n');
+  const originalLines = normalizedOriginal.split('\n');
+  const mixedScriptInSuspiciousUnit = detectionLines.some((line, index) =>
+    hasMixedScriptToken(originalLines[index] ?? '')
+      && CATEGORIES.some((category) =>
+        ['credential', 'payment', 'refund'].includes(category.key)
+          && anyHit(category.res, line, line).hit
+      )
+  );
+  if (mixedScriptInSuspiciousUnit && findings.some((f) => f.title === 'Credential solicitation' || f.title === 'Brand impersonation' || f.title === 'Fake refund / cashback bait')) {
+    score += 3;
+    finding('content', 'Mixed-script text in suspicious request', 'caution',
+      'A suspicious request contains visually confusable characters from multiple writing systems.', { signal: 'mixed-script-supporting' });
+  }
+  if (referenceContent && context.credentialForm && score > 0) {
+    const effectiveSeverity = classifySeverity(score);
+    const severityRank: Record<Severity, number> = { safe: 0, unknown: 1, caution: 2, threat: 3 };
+    for (const item of findings) {
+      if (severityRank[item.severity] > severityRank[effectiveSeverity]) item.severity = effectiveSeverity;
+    }
+  }
   return { score: Math.min(score, 100), findings, reasons };
 }
 
-const SUSPICIOUS_TLDS = ['.xyz', '.top', '.tk', '.ml', '.ga', '.cf', '.gq', '.click', '.link', '.info', '.buzz', '.rest', '.live', '.online', '.shop', '.cyou', '.work'];
+const SUSPICIOUS_TLDS = ['.xyz', '.top', '.tk', '.ml', '.ga', '.cf', '.gq', '.click', '.buzz', '.rest', '.cyou'];
+const LOWER_SIGNAL_TLDS = ['.link', '.info', '.live', '.online', '.shop', '.work'];
 const SHORTENERS = /\b(bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|cutt\.ly|rebrand\.ly|ow\.ly|shorturl\.at|rb\.gy|t\.ly)\b/i;
 const BRAND_LOOKALIKE = /(sbi|hdfc|icici|axis|kotak|paytm|phonepe|gpay|amazon|amzn|flipkart|myntra|netflix|google|apple|microsoft|whatsapp|npci|uidai|irctc)[-_]/i;
+const DOMAIN_BRANDS = ['paypal', 'sbi', 'hdfc', 'icici', 'axis', 'kotak', 'paytm', 'phonepe', 'amazon', 'flipkart', 'netflix', 'google', 'apple', 'microsoft', 'whatsapp', 'npci', 'uidai'];
 const BRAND_DOMAIN_RULES = [
   { name: 'PayPal', pattern: /\bpaypal\b/i, domains: ['paypal.com'] },
 
@@ -335,25 +524,21 @@ function detectBrandDomainMismatch(
       'Click-the-link bait',
       'Fake refund / cashback bait',
       'Account block/expiry threat',
-      'Digital arrest / authority threat',
-      'Remote-access request',
-      'Lottery / prize bait',
-      'Investment / trading bait',
-      'Job / recruitment bait',
     ].includes(f.title)
   );
 
   if (!suspiciousActivity) return null;
 
-  const domain = hostname.replace(/^www\./, '').toLowerCase();
+  const domain = canonicalHostname(hostname);
+  const asciiDomain = toAsciiHostname(hostname);
 
   for (const rule of BRAND_DOMAIN_RULES) {
     if (!rule.pattern.test(text)) continue;
 
     const belongsToBrand = rule.domains.some(
       (officialDomain) =>
-        domain === officialDomain ||
-        domain.endsWith(`.${officialDomain}`)
+        asciiDomain === officialDomain ||
+        asciiDomain.endsWith(`.${officialDomain}`)
     );
 
     if (!belongsToBrand) {
@@ -366,26 +551,128 @@ function detectBrandDomainMismatch(
 
   return null;
 }
+
+function isOfficialBrandDomain(hostname: string, text: string): boolean {
+  const domain = toAsciiHostname(hostname);
+  return BRAND_DOMAIN_RULES.some((rule) =>
+    rule.pattern.test(text) && rule.domains.some((official) =>
+      domain === official || domain.endsWith(`.${official}`)
+    )
+  );
+}
+
+function decodePunycodeLabel(label: string): string {
+  if (!label.startsWith('xn--')) return label;
+  const input = label.slice(4);
+  const output: number[] = [];
+  const delimiter = input.lastIndexOf('-');
+  let index = 0;
+  if (delimiter >= 0) {
+    for (const char of input.slice(0, delimiter)) output.push(char.codePointAt(0)!);
+    index = delimiter + 1;
+  }
+  let n = 128;
+  let bias = 72;
+  let insertion = 0;
+  while (index < input.length) {
+    const oldIndex = insertion;
+    let accumulator = insertion;
+    let weight = 1;
+    for (let k = 36; ; k += 36) {
+      if (index >= input.length) return label;
+      const code = input.charCodeAt(index++);
+      const digit = code >= 48 && code <= 57 ? code - 22 : code >= 65 && code <= 90 ? code - 65 : code >= 97 && code <= 122 ? code - 97 : 36;
+      if (digit >= 36) return label;
+      if (digit > Math.floor((0x7fffffff - accumulator) / weight)) return label;
+      accumulator += digit * weight;
+      const t = k <= bias ? 1 : k >= bias + 26 ? 26 : k - bias;
+      if (digit < t) {
+        const points = output.length + 1;
+        let adapted = oldIndex === 0 ? Math.floor((accumulator - oldIndex) / 700) : Math.floor((accumulator - oldIndex) / 2);
+        adapted += Math.floor(adapted / points);
+        let threshold = 0;
+        while (adapted > 455) {
+          adapted = Math.floor(adapted / 35);
+          threshold += 36;
+        }
+        bias = threshold + Math.floor(36 * adapted / (adapted + 38));
+        n += Math.floor(accumulator / points);
+        accumulator %= points;
+        output.splice(accumulator, 0, n);
+        insertion = accumulator + 1;
+        break;
+      }
+      weight *= 36 - t;
+    }
+  }
+  try {
+    return String.fromCodePoint(...output);
+  } catch {
+    return label;
+  }
+}
+
+function canonicalHostname(hostname: string): string {
+  const host = hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+  return host.split('.').map(decodePunycodeLabel).join('.');
+}
+
+const MULTI_LABEL_SUFFIXES = new Set([
+  'co.in', 'com.in', 'net.in', 'org.in', 'gen.in', 'firm.in',
+  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'org.au',
+  'co.jp', 'co.nz', 'com.br', 'com.sg', 'com.mx', 'co.za',
+]);
+
+export function getDomainParts(hostname: string): { hostname: string; subdomain: string; registrableDomain: string } {
+  const normalized = canonicalHostname(hostname);
+  const labels = normalized.split('.').filter(Boolean);
+  const suffix = labels.slice(-2).join('.');
+  const multiLabelSuffix = MULTI_LABEL_SUFFIXES.has(suffix);
+  const domainLabels = labels.length <= (multiLabelSuffix ? 2 : 1)
+    ? []
+    : labels.slice(-(multiLabelSuffix ? 3 : 2));
+  const registrableDomain = domainLabels.join('.');
+  return {
+    hostname: normalized,
+    registrableDomain,
+    subdomain: labels.slice(0, Math.max(0, labels.length - domainLabels.length)).join('.'),
+  };
+}
+
 export function analyzeDomain(hostname: string, source: 'page' | 'link' = 'page'): { score: number; findings: ForensicFinding[]; reasons: string[] } {
   const findings: ForensicFinding[] = [];
   const reasons: string[] = [];
   let score = 0;
+  const normalizedHostname = canonicalHostname(hostname);
   const where = source === 'link' ? 'Link in message' : 'Page domain';
   const add = (title: string, severity: Severity, detail: string, weight: number, reason: string) => {
     score += weight;
     reasons.push(reason);
-    findings.push({ id: crypto.randomUUID(), category: 'domain', title, severity, detail, evidence: { hostname, source: where }, timestamp: Date.now() });
+    findings.push({ id: crypto.randomUUID(), category: 'domain', title, severity, detail, evidence: { hostname: normalizedHostname, source: where }, timestamp: Date.now() });
   };
 
-  if (SUSPICIOUS_TLDS.some((t) => hostname.endsWith(t)))
-    add('Suspicious TLD', 'caution', 'Top-level domain frequently used by short-lived phishing pages.', 20, `Uncommon TLD (${where.toLowerCase()})`);
-  if (BRAND_LOOKALIKE.test(hostname))
-    add('Brand-lookalike domain', 'threat', 'Combines a real brand name with extra words — a classic phishing pattern.', 25, 'Domain mimics a known brand');
-  if (SHORTENERS.test(hostname))
+  if (SUSPICIOUS_TLDS.some((t) => normalizedHostname.endsWith(t)))
+    add('Suspicious TLD', 'caution', 'Top-level domain is disproportionately used by short-lived phishing pages; this is a supporting signal only.', 15, `Uncommon TLD (${where.toLowerCase()})`);
+  else if (LOWER_SIGNAL_TLDS.some((t) => normalizedHostname.endsWith(t)))
+    add('Less-common TLD', 'unknown', 'This top-level domain is less common but is not suspicious by itself.', 6, `Less-common TLD (${where.toLowerCase()})`);
+  const labels = normalizedHostname.split('.');
+  const suspiciousBrandLabel = labels.some((label) => {
+    const folded = normalizeConfusables(decodePunycodeLabel(label));
+    return DOMAIN_BRANDS.some((brand) =>
+      (hasMixedScriptToken(decodePunycodeLabel(label)) && folded === brand)
+        || (folded !== brand && (folded.startsWith(`${brand}-`) || folded.startsWith(`${brand}login`)
+        || folded.startsWith(`${brand}secure`) || folded.startsWith(`${brand}verify`)
+        || folded.endsWith(`-${brand}`) || folded.endsWith(`${brand}login`)))
+    );
+  });
+  if (BRAND_LOOKALIKE.test(normalizedHostname) || suspiciousBrandLabel)
+    add('Brand-lookalike domain', 'threat', 'A hostname label imitates a known brand with deceptive additions or IDN characters.', 25, 'Domain mimics a known brand');
+  if (SHORTENERS.test(normalizedHostname))
     add('URL shortener', 'caution', 'Shortened links hide the real destination and are common in phishing.', 15, 'Shortened link hides destination');
-  if ((hostname.match(/-/g) || []).length > 2)
+  if ((normalizedHostname.match(/-/g) || []).length > 2)
     add('Hyphen-heavy hostname', 'caution', 'Many hyphens often spell out a brand in a fake domain.', 10, 'Excessive hyphens in hostname');
-  if (/^\d+\.\d+\.\d+\.\d+/.test(hostname))
+  const octets = normalizedHostname.split('.');
+  if (octets.length === 4 && octets.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255))
     add('Raw IP address', 'threat', 'Legitimate services use a domain name, not a raw IP.', 30, 'Raw IP address in URL');
 
   return { score: Math.min(score, 100), findings, reasons };
@@ -394,28 +681,78 @@ export function analyzeDomain(hostname: string, source: 'page' | 'link' = 'page'
 // Domains that legitimately use punycode / long labels shouldn't be re-flagged endlessly
 function hostFromUrl(u: string): string | null {
   try {
-    return new URL(/^https?:\/\//i.test(u) ? u : `http://${u}`).hostname.replace(/^www\./, '');
+    return new URL(u.startsWith('//') ? `https:${u}` : /^https?:\/\//i.test(u) ? u : `https://${u}`).hostname;
   } catch {
     return null;
   }
 }
 
-function analyzeLinks(text: string): { score: number; findings: ForensicFinding[]; reasons: string[] } {
-  const urls = Array.from(new Set(text.match(INTEL_PATTERNS.url) || [])).map((u) => u.replace(/[),.;:]+$/, ''));
+function decodeUrlEncoding(value: string): string {
+  let decoded = value;
+  for (let i = 0; i < 2; i++) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break;
+    }
+  }
+  return decoded;
+}
+
+function urlsInText(text: string): string[] {
+  const direct = text.match(INTEL_PATTERNS.url) || [];
+  const encoded = (text.match(/(?:%[0-9a-f]{2}){3,}[^\s"'<>]*/gi) || [])
+    .map(decodeUrlEncoding)
+    .filter((value) => /^(?:https?:\/\/|\/\/|www\.)/i.test(value));
+  return [...direct, ...encoded];
+}
+
+function cleanUrl(value: string): string {
+  try {
+    const trimmed = decodeUrlEncoding(value).replace(/[),.;:!?'"'<>]+$/, '');
+    const url = new URL(trimmed.startsWith('//') ? `https:${trimmed}` : /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return value.replace(/[)\]},.;:!?'"'<>]+$/, '');
+  }
+}
+
+function analyzeLinks(text: string, linkUrls: string[] = [], pageHostname = ''): { score: number; findings: ForensicFinding[]; reasons: string[] } {
+  const urls = Array.from(new Set([
+    ...urlsInText(text),
+    ...linkUrls,
+  ].map(cleanUrl)));
   const seen = new Set<string>();
   let score = 0;
   const findings: ForensicFinding[] = [];
   const reasons: string[] = [];
-  for (const u of urls.slice(0, 10)) {
+  for (const u of urls.slice(0, 30)) {
     const host = hostFromUrl(u);
-    if (!host || seen.has(host)) continue;
-    seen.add(host);
-    const r = analyzeDomain(host, 'link');
+    const normalizedHost = host ? canonicalHostname(host) : '';
+    const currentHost = pageHostname ? canonicalHostname(pageHostname) : '';
+    if (!normalizedHost || seen.has(normalizedHost) || normalizedHost === currentHost) continue;
+    seen.add(normalizedHost);
+    const r = analyzeDomain(normalizedHost, 'link');
+    if (currentHost) {
+      const currentRegistrable = getDomainParts(currentHost).registrableDomain;
+      const linkRegistrable = getDomainParts(normalizedHost).registrableDomain;
+      const sameSite = currentRegistrable && currentRegistrable === linkRegistrable;
+      const meaningfulSubdomainRisk = r.findings.some((f) =>
+        f.title === 'Brand-lookalike domain' || f.title === 'URL shortener'
+      );
+      if (sameSite && !meaningfulSubdomainRisk) continue;
+    }
     score += r.score;
     findings.push(...r.findings);
     reasons.push(...r.reasons);
   }
-  return { score: Math.min(score, 60), findings, reasons };
+  return { score: Math.min(score, 25), findings, reasons };
 }
 
 export function classifySeverity(score: number): Severity {
@@ -425,20 +762,27 @@ export function classifySeverity(score: number): Severity {
   return 'safe';
 }
 
-export function runFullAnalysis(url: string, text: string): ScamAnalysis {
+export function runFullAnalysis(url: string, text: string, context: AnalysisContext = {}): ScamAnalysis {
   let hostname = '';
   try {
-    hostname = new URL(url).hostname;
+    hostname = canonicalHostname(new URL(url).hostname);
   } catch {}
   const isRealPage = /^https?:/i.test(url) && hostname && hostname !== 'pasted.local';
 
-  const content = analyzeContent(text);
-  const links = analyzeLinks(text);
-const domain = isRealPage ? analyzeDomain(hostname, 'page') : { score: 0, findings: [], reasons: [] };
+  const normalizedText = detectionText(text);
+  const referenceContent = context.referenceContent ?? isReferenceContent(normalizedText);
+  let asciiHostname = hostname;
+  try {
+    asciiHostname = new URL(url).hostname;
+  } catch {}
+  const trustedCredentialSite = !!(isRealPage && context.credentialForm && isOfficialBrandDomain(asciiHostname, normalizedText));
+  const content = analyzeContent(text, { ...context, referenceContent, trustedCredentialSite });
+  const links = analyzeLinks(text, context.links, hostname);
+  const domain = isRealPage ? analyzeDomain(hostname, 'page') : { score: 0, findings: [], reasons: [] };
   if (isRealPage) {
   const mismatch = detectBrandDomainMismatch(
     hostname,
-    text,
+    normalizedText,
     content.findings
   );
 
@@ -462,6 +806,21 @@ const domain = isRealPage ? analyzeDomain(hostname, 'page') : { score: 0, findin
     });
   }
 }
+  if (isRealPage && context.credentialForm && domain.findings.some((f) =>
+    f.title === 'Suspicious TLD' || f.title === 'Brand-lookalike domain' || f.title === 'Raw IP address'
+  )) {
+    domain.score += 15;
+    domain.reasons.push('Sensitive-data form on a suspicious domain');
+    domain.findings.push({
+      id: crypto.randomUUID(),
+      category: 'domain',
+      title: 'Sensitive-data form on suspicious domain',
+      severity: 'threat',
+      detail: 'This page requests sensitive information while using a domain with phishing-associated characteristics.',
+      evidence: { hostname },
+      timestamp: Date.now(),
+    });
+  }
   const combinedScore = Math.min(content.score + links.score + domain.score, 100);
 
   return {
@@ -476,19 +835,43 @@ const domain = isRealPage ? analyzeDomain(hostname, 'page') : { score: 0, findin
 }
 
 // ── Domain age via RDAP (optional, async) — used by the live page scanner ──
-// RDAP servers send `Access-Control-Allow-Origin: *`, so this works from the extension with
-// no backend. A domain registered days ago is one of the strongest phishing signals there is.
-const FREE_TLDS_ALWAYS_FLAG = /\.(tk|ml|ga|cf|gq)$/i;
+// Only the hostname is sent to the public RDAP service. Cache successes and failures to avoid
+// repeating lookups while a dynamic page is being rescanned.
+const ageCache = new Map<string, { expiresAt: number; finding: ForensicFinding | null }>();
+const ageRequests = new Map<string, Promise<ForensicFinding | null>>();
+
+function registrableDomain(hostname: string): string {
+  return toAsciiHostname(getDomainParts(hostname).registrableDomain);
+}
+
 export async function checkDomainAge(hostname: string): Promise<ForensicFinding | null> {
-  if (!hostname || /^\d+\.\d+\.\d+\.\d+/.test(hostname)) return null;
-  const domain = hostname.replace(/^www\./, '');
+  const normalized = hostname.toLowerCase().replace(/\.$/, '');
+  const octets = normalized.split('.');
+  if (!normalized || (octets.length === 4 && octets.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255))
+    || (normalized.startsWith('[') && normalized.endsWith(']'))) return null;
+  const domain = registrableDomain(normalized);
+  const cached = ageCache.get(domain);
+  if (cached && cached.expiresAt > Date.now()) return cached.finding;
+  const pending = ageRequests.get(domain);
+  if (pending) return pending;
+
+  const request = lookupDomainAge(domain);
+  ageRequests.set(domain, request);
+  try {
+    const finding = await request;
+    ageCache.set(domain, { expiresAt: Date.now() + (finding ? 6 * 60 * 60 * 1000 : 10 * 60 * 1000), finding });
+    if (ageCache.size > 500) ageCache.delete(ageCache.keys().next().value!);
+    return finding;
+  } finally {
+    ageRequests.delete(domain);
+  }
+}
+
+async function lookupDomainAge(domain: string): Promise<ForensicFinding | null> {
   try {
     const res = await fetch(`https://rdap.org/domain/${encodeURIComponent(domain)}`, { signal: AbortSignal.timeout(6000) });
     if (!res.ok) {
-      // Free TLDs often have no RDAP record at all — itself a red flag
-      return FREE_TLDS_ALWAYS_FLAG.test(domain)
-        ? mkAgeFinding('Free-TLD domain, no registry record', 'caution', 'This domain uses a free TLD with no public registration record — common for throwaway phishing sites.', { hostname: domain })
-        : null;
+      return null;
     }
     const data = await res.json();
     const reg = (data.events || []).find((e: any) => e.eventAction === 'registration');
@@ -496,8 +879,8 @@ export async function checkDomainAge(hostname: string): Promise<ForensicFinding 
     const days = Math.floor((Date.now() - new Date(reg.eventDate).getTime()) / 86400000);
     if (days < 0) return null;
     if (days <= 30)
-      return mkAgeFinding(`Domain registered ${days} day${days === 1 ? '' : 's'} ago`, 'threat',
-        'This domain is brand new. The vast majority of newly registered domains that reach users this fast are phishing.', { hostname: domain, ageDays: days, registered: reg.eventDate.slice(0, 10) });
+      return mkAgeFinding(`Domain registered ${days} day${days === 1 ? '' : 's'} ago`, 'caution',
+        'This domain is newly registered. Age is a supporting signal, not proof of malicious activity.', { hostname: domain, ageDays: days, registered: reg.eventDate.slice(0, 10) });
     if (days <= 180)
       return mkAgeFinding(`Recently registered domain (${days} days)`, 'caution',
         'The domain is only a few months old — worth extra caution for a site handling money or credentials.', { hostname: domain, ageDays: days, registered: reg.eventDate.slice(0, 10) });
@@ -514,17 +897,22 @@ export function extractIntel(text: string) {
   const emails = Array.from(new Set(text.match(INTEL_PATTERNS.email) || []));
   const phones = Array.from(new Set(text.match(INTEL_PATTERNS.phone) || []));
   const phoneDigits = phones.map((p) => p.replace(/\D/g, '').slice(-10));
+  const accountContext = /\b(?:bank\s*)?(?:account|a\/c|acct|beneficiary)\b/i;
+  const urlValues = urlsInText(text).map(cleanUrl);
+  const upiCandidates = text.match(INTEL_PATTERNS.upi) || [];
   return {
-    upiIds: Array.from(new Set(text.match(INTEL_PATTERNS.upi) || [])).filter(
-      (s) => !/@(gmail|yahoo|outlook|hotmail|icloud|proton|live|rediff)/i.test(s) && !emails.some((e) => e.startsWith(s + '.'))
-    ),
-    phoneNumbers: phones,
-    urls: Array.from(new Set((text.match(INTEL_PATTERNS.url) || []).map((u) => u.replace(/[),.;:]+$/, '')))),
-    bankAccounts: Array.from(new Set(text.match(INTEL_PATTERNS.bankAccount) || [])).filter((a) => {
-      const d = a.replace(/\D/g, '');
-      if (/^[6-9]\d{9}$/.test(d)) return false; // looks like a mobile number, not an account
-      return !phoneDigits.some((p) => d.endsWith(p) || p.endsWith(d));
+    upiIds: Array.from(new Set(upiCandidates)).filter((s) => {
+      const email = emails.some((e) => e.toLowerCase() === s.toLowerCase() || e.toLowerCase().startsWith(`${s.toLowerCase()}.`));
+      return !email && !/@(gmail|yahoo|outlook|hotmail|icloud|proton|live|rediff)\b/i.test(s);
     }),
+    phoneNumbers: phones,
+    urls: Array.from(new Set(urlValues)),
+    bankAccounts: Array.from(new Set((text.match(INTEL_PATTERNS.bankAccount) || []).filter((a) => {
+      const index = text.indexOf(a);
+      const surrounding = text.slice(Math.max(0, index - 45), index + a.length + 20);
+      const d = a.replace(/\D/g, '');
+      return accountContext.test(surrounding) && !/^[6-9]\d{9}$/.test(d) && !phoneDigits.some((p) => d.endsWith(p) || p.endsWith(d));
+    }))),
     emailAddresses: emails,
     names: [] as string[],
   };

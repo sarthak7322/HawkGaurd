@@ -15,18 +15,18 @@ Ranked by how much they'd hurt at the hackathon. Two are already fixed (marked �
 
 ## High — could bite you in the demo or a code review
 
-1. **Detection catches only ~1 in 3 scam texts (33%), with 20% false alarms.**
-   Measured on 15 real-style Indian scam SMS + 10 legit messages. Misses: lottery/prize,
-   "digital arrest", job scams, "install AnyDesk", obfuscated text ("0TP", "y0ur acc0unt"),
-   fake refund links, "hi mom new number". False alarms: a real HDFC OTP message and an
-   *RBI fraud-warning* message both got flagged (they contain "OTP"+"KYC" keywords).
-   This is the core "detection" claim — the regex library is thin. Either broaden it or
-   present detection honestly and lean on the Engage/Honeypot story.
+1. ✅ **Detection false positives and coverage (updated 2026-09-28).**
+   The earlier baseline caught only ~1 in 3 scam texts and had 20% false alarms. Contextual
+   analysis now distinguishes documentation, warnings, examples and active solicitations;
+   the current local benchmark catches 15/15 scam-style messages with 0/10 false alarms.
+   It also checks a GitHub repository and unrelated documentation host without a GitHub
+   allowlist. The benchmark includes intel-extraction regression checks.
+   The corpus includes the prior lottery, courier, job, remote-access, obfuscated-text,
+   refund, family-impersonation, Hindi OTP, HDFC OTP-delivery and RBI-warning cases.
 
-2. **README claims features that don't exist.** It lists **domain-age** and
-   **certificate-mismatch** checks; neither is in the code (`detection.ts` has no such
-   analyzer, and the `certificate` finding category is unused). A judge reading the code
-   will notice. Either build domain-age (RDAP is free, ~20 min) or drop the claims.
+2. ✅ **Domain-age check is implemented.** `detection.ts` performs a cached RDAP lookup;
+   recent registration is a supporting caution rather than proof of phishing. There is
+   still no certificate-mismatch analyzer, so that finding category remains unused.
 
 3. **Redirect tracker never resets.** `redirectChains` in `background/index.ts` accumulates
    per tab and is never cleared on navigation or tab close. After enough browsing, ordinary

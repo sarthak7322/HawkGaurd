@@ -3,96 +3,124 @@
 import type { ScamAnalysis, PanelStage } from '../shared/types';
 
 const BANNER_ID = 'hawkguard-alert-banner';
+const STYLE_ID = 'hawkguard-alert-style';
+let scanVersion = 0;
+let autoScanEnabled = true;
+let pageObserver: MutationObserver | undefined;
+const autoScanReady = chrome.storage.local.get('settings').then((data) => {
+  autoScanEnabled = data.settings?.autoScan !== false;
+}).catch((err) => {
+  console.warn('[HawkGuard] Could not read automatic-scan preference:', err);
+});
 
-function extractPageText(): string {
-  // Grab visible text but avoid script/style
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes.settings) return;
+  const enabled = changes.settings.newValue?.autoScan !== false;
+  if (enabled === autoScanEnabled) return;
+  autoScanEnabled = enabled;
+  if (autoScanEnabled) {
+    scheduleScan();
+    observeDynamicContent();
+  } else {
+    scanVersion++;
+    pageObserver?.disconnect();
+    pageObserver = undefined;
+    document.getElementById(BANNER_ID)?.remove();
+    document.getElementById(STYLE_ID)?.remove();
+  }
+});
+
+function extractPageData(): { text: string; context: { referenceContent: boolean; credentialForm: boolean; links: string[] } } {
+  const root = document.querySelector('main, [role="main"], article') || document.body;
+  if (!root) return { text: '', context: { referenceContent: false, credentialForm: false, links: [] } };
+
+  const ignored = 'script, style, noscript, svg, code, pre, kbd, nav, footer, [hidden], [aria-hidden="true"], [contenteditable]:not([contenteditable="false"]), #hawkguard-alert-banner';
+  const isVisible = (el: Element) => {
+    if (el.closest(ignored)) return false;
+    const style = getComputedStyle(el);
+    return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse';
+  };
+  const parts: string[] = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => {
       const parent = node.parentElement;
-      if (!parent) return NodeFilter.FILTER_REJECT;
-      const tag = parent.tagName.toLowerCase();
-      if (['script', 'style', 'noscript'].includes(tag)) return NodeFilter.FILTER_REJECT;
+      if (!parent || !isVisible(parent)) return NodeFilter.FILTER_REJECT;
       const t = (node.textContent || '').trim();
       return t.length > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
     },
   });
-  const parts: string[] = [];
   let n: Node | null;
+  let capturedLength = 0;
   while ((n = walker.nextNode())) {
-    parts.push((n.textContent || '').trim());
-    if (parts.length > 400) break;
+    const part = (n.textContent || '').trim();
+    if (!part) continue;
+    const remaining = 12000 - capturedLength;
+    parts.push(part.slice(0, remaining));
+    capturedLength += Math.min(part.length, remaining);
+    if (parts.length >= 600 || capturedLength >= 12000) break;
   }
-  // Add safe form metadata without reading user-entered values.
-const formEvidence: string[] = [];
 
-document.querySelectorAll('input, textarea, select').forEach((el) => {
-  const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
-  const type = input instanceof HTMLInputElement ? input.type.toLowerCase() : '';
-  if (type === 'hidden') return;
-
-  const descriptor = [
-    type,
-    input.getAttribute('placeholder') || '',
-    input.getAttribute('aria-label') || '',
-    input.getAttribute('name') || '',
-    input.id || '',
-  ].join(' ').toLowerCase();
-
-  if (/(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan)/i.test(descriptor)) {
-    if (/password|passcode/i.test(descriptor)) {
-      formEvidence.push('Please enter your password.');
-    }
-    if (/otp|one[- ]time/i.test(descriptor)) {
-      formEvidence.push('Please enter your OTP.');
-    }
-    if (/\bpin\b/i.test(descriptor)) {
-      formEvidence.push('Please enter your PIN.');
-    }
-    if (/cvv|c\.v\.v/i.test(descriptor)) {
-      formEvidence.push('Please enter your CVV.');
-    }
-    if (/card/i.test(descriptor)) {
-      formEvidence.push('Please enter your card number.');
-    }
-    if (/account/i.test(descriptor)) {
-      formEvidence.push('Please enter your account details.');
-    }
-    if (/aadhaar/i.test(descriptor)) {
-      formEvidence.push('Please enter your Aadhaar number.');
-    }
-    if (/pan/i.test(descriptor)) {
-      formEvidence.push('Please enter your PAN number.');
-    }
-  }
-});
-
-const buttonEvidence = Array.from(
-  document.querySelectorAll('button, input[type="submit"]')
-)
-  .map((el) => (el.textContent || (el as HTMLInputElement).value || '').trim())
-  .filter(Boolean);
-
-if (buttonEvidence.length) {
-  formEvidence.push(`Form actions: ${buttonEvidence.join(' | ')}`);
-}
   const pageTitle = document.title.trim();
+  const description = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
+  const brandMetadata = Array.from(document.querySelectorAll('img[alt], [aria-label]'))
+    .filter(isVisible)
+    .slice(0, 50)
+    .map((el) => el.getAttribute('alt') || el.getAttribute('aria-label') || '')
+    .filter(Boolean);
+  const text = [pageTitle, description, ...parts, ...brandMetadata].filter(Boolean).join(' ').slice(0, 12000);
+  const credentialForm = Array.from(document.querySelectorAll('input, textarea, select')).some((el) => {
+    if (!isVisible(el)) return false;
+    const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+    const type = input instanceof HTMLInputElement ? input.type.toLowerCase() : '';
+    if (type === 'hidden') return false;
+    const descriptor = [
+      type,
+      input.getAttribute('placeholder') || '',
+      input.getAttribute('aria-label') || '',
+      input.getAttribute('name') || '',
+      input.id || '',
+    ].join(' ');
+    return /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan)/i.test(descriptor);
+  });
 
-  const brandMetadata = Array.from(
-  document.querySelectorAll('img[alt], [aria-label]')
-)
-  .map((el) =>
-    el.getAttribute('alt') || el.getAttribute('aria-label') || ''
-  )
-  .filter(Boolean);
+  const links = Array.from(document.querySelectorAll('a[href]'))
+    .filter(isVisible)
+    .slice(0, 30)
+    .map((el) => {
+      try {
+        const link = new URL((el as HTMLAnchorElement).href, location.href);
+        if (!['http:', 'https:'].includes(link.protocol)) return '';
+        link.username = '';
+        link.password = '';
+        link.search = '';
+        link.hash = '';
+        return link.toString();
+      } catch {
+        return '';
+      }
+    })
+    .filter(Boolean);
 
-return [pageTitle, ...parts, ...formEvidence, ...brandMetadata]
-  .filter(Boolean)
-  .join(' ')
-  .slice(0, 20000);
+  const codeLength = Array.from(root.querySelectorAll('pre, code'))
+    .reduce((total, el) => total + (el.textContent?.length || 0), 0);
+  const pathLooksDocumentary = /\/(?:docs?|documentation|wiki|blob|raw)\//i.test(location.pathname)
+    || /\.md$/i.test(location.pathname)
+    || /(?:documentation|source code|security advisory|research|scam awareness)/i.test(`${pageTitle} ${description}`);
+  const codeHeavy = codeLength > 800 && codeLength / Math.max(root.textContent?.length || 1, 1) > 0.15;
+
+  return {
+    text,
+    context: {
+      referenceContent: pathLooksDocumentary || codeHeavy,
+      credentialForm,
+      links,
+    },
+  };
 }
 
 function injectBanner(analysis: ScamAnalysis) {
-  if (document.getElementById(BANNER_ID)) return;
+  document.getElementById(BANNER_ID)?.remove();
+  document.getElementById(STYLE_ID)?.remove();
   if (analysis.overallSeverity === 'safe') return;
 
   const banner = document.createElement('div');
@@ -100,6 +128,7 @@ function injectBanner(analysis: ScamAnalysis) {
   banner.setAttribute('data-severity', analysis.overallSeverity);
 
   const style = document.createElement('style');
+  style.id = STYLE_ID;
   style.textContent = `
     #${BANNER_ID} {
       position: fixed;
@@ -252,16 +281,28 @@ function escapeHtml(s: string): string {
 
 async function scan() {
   try {
+    await autoScanReady;
+    if (!autoScanEnabled) {
+      document.getElementById(BANNER_ID)?.remove();
+      document.getElementById(STYLE_ID)?.remove();
+      return;
+    }
+    const version = ++scanVersion;
     if (window.top !== window) return; // top frame only
     if (location.protocol.startsWith('chrome')) return;
     // HawkGuard's own honeypot pages (backend/src/honeypot.js) — don't scan the trap we set
     if (document.querySelector('meta[name="hawkguard"][content="decoy"]')) return;
-    const text = extractPageText();
+    const { text, context } = extractPageData();
+    if (!text) {
+      document.getElementById(BANNER_ID)?.remove();
+      document.getElementById(STYLE_ID)?.remove();
+      return;
+    }
     const res = await chrome.runtime.sendMessage({
       kind: 'ANALYZE_PAGE',
-      payload: { url: location.href, text, html: '' },
+      payload: { url: location.href, text, html: '', context },
     });
-    if (res?.ok && res.data) {
+    if (version === scanVersion && res?.ok && res.data) {
       injectBanner(res.data);
     }
   } catch (err) {
@@ -269,9 +310,38 @@ async function scan() {
   }
 }
 
-// Run once when DOM is ready
+let scanTimer: number | undefined;
+function scheduleScan() {
+  window.clearTimeout(scanTimer);
+  scanTimer = window.setTimeout(scan, 900);
+}
+
+function observeDynamicContent() {
+  if (!autoScanEnabled || !document.body || pageObserver) return;
+  pageObserver = new MutationObserver((records) => {
+    if (records.some((record) => {
+      const target = record.target instanceof Element ? record.target : record.target.parentElement;
+      return !target?.closest(`#${BANNER_ID}`);
+    })) scheduleScan();
+  });
+  pageObserver.observe(document.body, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ['href', 'placeholder', 'aria-label', 'name', 'id', 'type', 'alt', 'title', 'hidden', 'aria-hidden', 'style'],
+  });
+}
+
+async function startScanner() {
+  await autoScanReady;
+  await scan();
+  observeDynamicContent();
+}
+
+// Scan after initial render, then debounce meaningful SPA / dynamic-content changes.
 if (document.readyState === 'complete' || document.readyState === 'interactive') {
-  setTimeout(scan, 400);
+  setTimeout(() => { void startScanner(); }, 400);
 } else {
-  window.addEventListener('load', () => setTimeout(scan, 400));
+  window.addEventListener('load', () => setTimeout(() => { void startScanner(); }, 400), { once: true });
 }

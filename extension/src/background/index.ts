@@ -10,7 +10,7 @@ import type {
   ThreatReport,
   PanelStage,
 } from '../shared/types';
-import { runFullAnalysis, extractIntel, checkDomainAge, classifySeverity } from '../shared/detection';
+import { runFullAnalysis, extractIntel, checkDomainAge, classifySeverity, type AnalysisContext } from '../shared/detection';
 import { classifyScenario, pickTemplate } from '../shared/scenarios';
 import { getPersona, PERSONAS } from '../shared/personas';
 import { generatePersonaResponse } from '../shared/claude-client';
@@ -63,8 +63,14 @@ const redirectChains = new Map<string, string[]>();
 chrome.webRequest.onBeforeRedirect.addListener(
   (details) => {
     if (details.type !== 'main_frame') return;
+    let redirectHost: string;
+    try {
+      redirectHost = new URL(details.url).hostname;
+    } catch {
+      return;
+    }
     const chain = redirectChains.get(details.tabId.toString()) || [];
-    chain.push(details.url);
+    chain.push(redirectHost);
     redirectChains.set(details.tabId.toString(), chain);
   },
   { urls: ['<all_urls>'] }
@@ -113,8 +119,17 @@ async function screechFor(analysis: ScamAnalysis, key: string) {
 }
 
 // ─── Analysis pipeline ────────────────────────────────────────
-async function analyzePage(url: string, text: string, tabId?: number): Promise<ScamAnalysis> {
-  const analysis = runFullAnalysis(url, text);
+async function analyzePage(url: string, text: string, tabId?: number, context?: AnalysisContext): Promise<ScamAnalysis> {
+  let analysisUrl = url;
+  try {
+    const parsed = new URL(url);
+    parsed.username = '';
+    parsed.password = '';
+    parsed.search = '';
+    parsed.hash = '';
+    analysisUrl = parsed.toString();
+  } catch {}
+  const analysis = runFullAnalysis(analysisUrl, text, context);
 
   // Enrich with redirect chain if available
   if (tabId !== undefined) {
@@ -368,10 +383,15 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
       if (msg.kind !== 'OPEN_PANEL') await stateReady;
       switch (msg.kind) {
         case 'ANALYZE_PAGE': {
+          if (!state.settings.autoScan) {
+            sendResponse({ ok: false, error: 'Automatic page scanning is disabled' });
+            break;
+          }
           const result = await analyzePage(
             msg.payload.url,
             msg.payload.text,
-            sender.tab?.id
+            sender.tab?.id,
+            msg.payload.context
           );
           sendResponse({ ok: true, data: result });
           break;

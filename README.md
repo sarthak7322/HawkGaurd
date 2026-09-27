@@ -132,16 +132,18 @@ On the persona's 3rd reply they "trust" the scammer and hand over a login to a f
 ```
 
 ### Detect
-Content script scans the DOM (`src/content/index.ts`). Text is passed to the background worker, which runs pattern matching in `src/shared/detection.ts`.
+Content script scans visible page text (`src/content/index.ts`); matching stays on-device in `src/shared/detection.ts`. It skips code blocks, navigation and hidden content, never reads typed field values, and sends only bounded text, credential-field presence, and query-free link destinations to the extension worker. Page context distinguishes active solicitation from scam examples, warnings, documentation and security research, so repositories and awareness material are not treated like incoming scam messages. Dynamic pages are rescanned after debounced content changes.
 
 ### Investigate
 The forensic pipeline checks:
-- **Content playbooks** — verb-anchored patterns for credential solicitation, payment demands, "digital arrest"/courier fraud, lottery/prize, remote-access tools, investment/crypto, fake jobs, refunds, family impersonation, utility-disconnection and account-block threats, plus authority and brand impersonation. Leetspeak (e.g. "0TP") is de-obfuscated first, and negative signals (bank OTP-delivery texts, "never share" disclaimers, fraud *warnings*, transaction alerts) suppress false alarms.
-- **Links & domains** — suspicious TLDs, brand-lookalike hostnames, URL shorteners, raw IPs, both for the page and for any link inside a pasted message.
-- **Domain age** — a live RDAP lookup flags brand-new domains (a top phishing signal); works from the extension with no backend.
+- **Content playbooks** — contextual patterns for credential/recovery-code theft, OAuth permissions, MFA approvals, CAPTCHA and shared-document lures, callback and QR-payment phishing, payment/refund fees, "digital arrest"/courier fraud, lottery/prize, remote-access tools, investment/task jobs, family impersonation, utility-disconnection and account-block threats, plus authority and brand impersonation. Detection normalizes Unicode NFKC, invisible formatting marks and controlled letter separators, and handles a restricted set of leetspeak/confusable characters; normalization alone is never a finding. OTP-delivery texts, explicit warnings and transaction alerts suppress false alarms. A credential form is supporting evidence only when paired with a suspicious domain.
+- **Links & domains** — parsed hostnames (separate from paths and query strings), suspicious TLDs, IDN/confusable brand-lookalike hostnames, URL shorteners, raw IPs, and protocol-relative or percent-encoded links, both for the page and for links in scanned text.
+- **Domain age** — a cached RDAP lookup adds a supporting caution for recently registered domains; age alone is not treated as proof of phishing.
 - **Redirect chain** — multi-hop redirects via `chrome.webNavigation` / `chrome.webRequest`.
 
-On a 25-message benchmark (15 real-style Indian scam texts + 10 legitimate messages) this catches **15/15 scams with 0 false alarms**. Run it yourself: `cd extension && npx esbuild scripts/detector-benchmark.ts --bundle --platform=node --format=esm --outfile=/tmp/b.mjs && node /tmp/b.mjs`.
+The local benchmark covers 15 scam-style messages, 10 legitimate messages, reference-content false positives (including a GitHub repository without a GitHub safe-list), and intel-extraction edge cases. Run it with `cd extension` and `npx esbuild scripts/detector-benchmark.ts --bundle --platform=node --format=esm --outfile=$env:TEMP\hawkguard-benchmark.mjs; node $env:TEMP\hawkguard-benchmark.mjs` in PowerShell.
+
+**Privacy:** automatic page scanning can be disabled with **Auto-scan** in the popup. Page text is analyzed locally by the extension, is not sent to HawkGuard's backend, and is not retained as page text; findings omit matched message excerpts. Query strings are removed from stored page URLs, link checks use query-free destinations, and redirect tracking retains hostnames only. The registrable hostname (not page text or query string) is sent to `rdap.org` for optional domain-age enrichment. Explicitly pasted messages are analyzed locally. If you create a case report, its engagement transcript and extracted intel are stored locally with the last 20 reports.
 
 Each check emits a **ForensicFinding** with a severity, detail, and evidence.
 

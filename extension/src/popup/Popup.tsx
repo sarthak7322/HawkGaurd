@@ -63,10 +63,23 @@ export function Popup() {
             <div className="brand-sub">Defensive intelligence</div>
           </div>
         </div>
-        <SoundToggle
-          on={state?.settings.sound ?? true}
-          onChange={(sound) => chrome.runtime.sendMessage({ kind: 'SET_SETTINGS', payload: { sound } })}
-        />
+        <div className="popup-controls">
+          <label className="scan-toggle" title="Analyze visible page content locally">
+            <input
+              type="checkbox"
+              checked={state?.settings.autoScan ?? true}
+              onChange={(event) => chrome.runtime.sendMessage({
+                kind: 'SET_SETTINGS',
+                payload: { autoScan: event.target.checked },
+              })}
+            />
+            <span>Auto-scan</span>
+          </label>
+          <SoundToggle
+            on={state?.settings.sound ?? true}
+            onChange={(sound) => chrome.runtime.sendMessage({ kind: 'SET_SETTINGS', payload: { sound } })}
+          />
+        </div>
       </header>
 
       <nav className="segmented popup-tabs" role="tablist">
