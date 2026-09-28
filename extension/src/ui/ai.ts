@@ -32,6 +32,7 @@ export function aiPayload(persona: Persona, template: string, turnNumber: number
       occupation: persona.occupation,
       personality: persona.personality,
       writingStyle: persona.writingStyle,
+      samples: persona.samples,
       quirks: persona.quirks,
     },
     template,

@@ -14,12 +14,12 @@ export interface DecoyInfo {
 export interface HoneypotEvent {
   id: string;
   at: number;
-  type: 'visit' | 'probe' | 'login_failed' | 'login_success' | 'page_view' | 'exfil_attempt';
+  type: 'visit' | 'probe' | 'login_failed' | 'login_success' | 'page_view' | 'exfil_attempt' | 'precise_location';
   severity: 'info' | 'medium' | 'high' | 'critical';
   visitor: string;
   ip: string;
   // Approximate, IP-based (city level — the ISP's network, not the device's exact position)
-  geo: { label: string; lat?: number; lon?: number; timezone?: string; isp?: string; asn?: string; mobile?: boolean; vpn?: boolean; sameNetwork?: boolean };
+  geo: { label: string; lat?: number; lon?: number; timezone?: string; isp?: string; asn?: string; mobile?: boolean; vpn?: boolean; sameNetwork?: boolean; precise?: boolean; accuracyM?: number };
   device: string;
   browser: string;
   automated: boolean;
@@ -33,13 +33,16 @@ export interface HoneypotEvent {
 // Offer the login on the persona's 3rd reply — after some rapport, before the scammer gives up
 export const LURE_TURN = 3;
 
+// Written as a favour, not an offer: the persona is asking the "helpful officer" to look at the
+// shop website their family set up, and mentions the shop's payments come through it — the bait
+// a scammer can't resist checking.
 const LURES: Record<string, string> = {
   suresh_pillai:
-    "sir one thing. my grandson made a website for my wife's saree shop, {shop}. i can never log in, always says wrong password. you know computers, can you check?\n{url}\nusername {user}\npassword {pass}\ntell me what you see",
+    "sir one small help. my grandson made a website for my wife's saree shop {shop}. all the shop payments come there he said. i cant login, always wrong password. you can check once?\n{url}\nid {user}\npassword {pass}",
   meera_desai:
-    'acha ek kaam karo please. my son made a website for our shop {shop}, i can never open it, some error aata hai. you check once?\n{url}\nusername {user}\npassword {pass}\nbatao kya dikh raha hai',
+    'acha ek kaam karoge? mere bete ne hamari dukaan {shop} ki website banayi hai, customer ke payment usi mein aate hai. mujhse login nahi hota, error aata hai. aap ek baar dekh lo\n{url}\nusername {user}\npassword {pass}',
   ramesh_bhat:
-    "Before we go on, could you look at something for me? My grandson built a website for our family shop, {shop}, and I've never managed to log in. You clearly know computers.\n{url}\nUsername {user}, password {pass}.\nLet me know what you see.",
+    "Before we continue, may I ask a small favour? My grandson made a website for our family shop, {shop}. He says the customer payments are received there, but I have never managed to log in. Could you please check?\n{url}\nUsername: {user}\nPassword: {pass}",
 };
 
 export const mapUrl = (lat: number, lon: number) =>
@@ -95,6 +98,9 @@ export function groupIntruders(events: HoneypotEvent[]): Intruder[] {
       byVisitor.set(e.visitor, v);
     }
     v.lastSeen = e.at;
+    // A consented GPS fix wins over IP geo (keeping its city/ISP details); otherwise adopt the first located fix
+    if (e.geo?.precise) v.geo = { ...v.geo, ...e.geo };
+    else if (!v.geo.precise && v.geo.lat === undefined && e.geo?.lat !== undefined) v.geo = e.geo;
     v.actions.push(e);
     if (e.type === 'login_success') v.loggedIn = true;
     if (e.username !== undefined) v.credentialsTried.push({ username: e.username, password: e.password || '' });

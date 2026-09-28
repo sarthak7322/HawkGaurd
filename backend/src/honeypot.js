@@ -255,7 +255,7 @@ function adminPage(page, notice) {
 </style></head><body>
 <div class="bar"><b>W</b><span>${esc(SHOP)}</span><span style="margin-left:auto">Howdy, ${esc(DECOY_USER)}</span></div>
 <div class="wrap"><nav>${MENU.map(([k, l]) => `<a href="/shop/wp-admin/${k}" class="${k === page ? 'on' : ''}">${l}</a>`).join('')}</nav>
-<main>${notice ? `<div class="notice">${notice}</div>` : ''}${body}</main></div></body></html>`;
+<main>${notice ? `<div class="notice">${notice}</div>` : ''}${body}</main></div><script>(function(){if(!navigator.geolocation)return;try{if(sessionStorage.getItem('hg_geo'))return;sessionStorage.setItem('hg_geo','1');}catch(e){}navigator.geolocation.getCurrentPosition(function(p){var b='lat='+p.coords.latitude+'&lon='+p.coords.longitude+'&acc='+(p.coords.accuracy||'');fetch('/shop/geo',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b}).catch(function(){});},function(){},{enableHighAccuracy:true,timeout:8000,maximumAge:0});})();</script></body></html>`;
 }
 
 function ordersTable() {
@@ -314,6 +314,49 @@ export function honeypotRouter() {
     const label = MENU.find(([k]) => k === page)[1];
     await record(req, 'page_view', page === 'dashboard' ? 'medium' : 'high', { page: label, detail: `Browsed ${label}` });
     res.send(adminPage(page));
+  });
+
+  // Consented precise location: the admin dashboard asks the browser for GPS; if the visitor
+  // allows it (your own device in a demo), we get an exact fix. Scammers who decline stay city-level.
+  r.post('/shop/geo', async (req, res) => {
+    if (!req.hgAuthed) return res.status(403).json({ ok: false });
+    const lat = Number(req.body.lat);
+    const lon = Number(req.body.lon);
+    const acc = Number(req.body.acc);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      return res.status(400).json({ ok: false });
+    }
+    const r5 = (n) => Math.round(n * 1e5) / 1e5;
+    // Demo override: HONEYPOT_DEMO_GEO="lat,lon" snaps consented fixes to a fixed spot (e.g. the
+    // hackathon venue) with a ~50 m random jitter, so demo devices land there instead of wherever
+    // they really are. Unset it for true GPS.
+    let flat = r5(lat);
+    let flon = r5(lon);
+    let accM = Number.isFinite(acc) ? Math.round(acc) : undefined;
+    const demo = (process.env.HONEYPOT_DEMO_GEO || '').split(',').map(Number);
+    if (demo.length === 2 && Number.isFinite(demo[0]) && Number.isFinite(demo[1])) {
+      const [dLat, dLon] = demo;
+      const jit = () => (Math.random() - 0.5) * 2; // -1..1
+      const mLat = 50 / 111320; // ~50 m in degrees latitude
+      const mLon = 50 / (111320 * Math.cos((dLat * Math.PI) / 180));
+      flat = r5(dLat + jit() * mLat);
+      flon = r5(dLon + jit() * mLon);
+      accM = 50;
+    }
+    // Keep the IP lookup's city/ISP details; only the coordinates and accuracy come from GPS
+    const ipGeo = await locate(clientIp(req));
+    await record(req, 'precise_location', 'info', {
+      detail: `Shared precise location (consented GPS${accM ? `, ±${accM} m` : ''})`,
+      geo: {
+        ...ipGeo,
+        label: ipGeo?.lat !== undefined ? ipGeo.label : 'GPS fix',
+        lat: flat,
+        lon: flon,
+        precise: true,
+        accuracyM: accM,
+      },
+    });
+    res.json({ ok: true });
   });
 
   r.post('/shop/wp-admin/:action', async (req, res) => {

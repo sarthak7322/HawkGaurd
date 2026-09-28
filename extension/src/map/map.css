@@ -24,9 +24,8 @@ html, body, #root { height: 100%; }
 
 /* ─── Map canvas ──────────────────────────────── */
 .map-canvas { flex: 1; position: relative; min-width: 0; background: #0a0b10; }
-.leaflet-host { position: absolute; inset: 0; }
-/* Darken the light OSM tiles to fit the theme (leaves markers/labels above unaffected) */
-.leaflet-host .leaflet-tile-pane { filter: invert(1) hue-rotate(190deg) brightness(0.95) contrast(0.9) saturate(0.7); }
+.mapbox-host { position: absolute; inset: 0; }
+.mapbox-host .mapboxgl-ctrl-bottom-right, .mapbox-host .mapboxgl-ctrl-bottom-left { display: none; }
 .map-overlay {
   position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 500;
   padding: 10px 16px; border-radius: 999px; font-size: 13px;
@@ -34,9 +33,6 @@ html, body, #root { height: 100%; }
 }
 
 /* Leaflet dark tweaks */
-.leaflet-container { background: #0a0b10; font-family: var(--font); }
-.leaflet-bar a { background: var(--bg-2); color: var(--text); border-color: var(--border); }
-.leaflet-bar a:hover { background: var(--surface-2); }
 .threat-tip {
   background: rgba(12, 14, 20, 0.95); color: var(--text); border: 1px solid var(--border-strong);
   border-radius: 8px; box-shadow: 0 8px 24px -10px rgba(0,0,0,.8); font-size: 12px; padding: 6px 10px;

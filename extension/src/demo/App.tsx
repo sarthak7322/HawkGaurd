@@ -26,6 +26,7 @@ import {
   scenarioLabel as label,
   type PipelineTrace,
 } from '../ui/components';
+import { DEMO_WAVES, WaveField } from './alive';
 
 type Trace = PipelineTrace & { injection: boolean };
 
@@ -92,7 +93,8 @@ export function App() {
 
     // The injection-resistant pipeline: classify → template → voice-only rewrite
     const scenario = classifyScenario(text);
-    const template = pickTemplate(scenario);
+    const used = messages.map((m) => m.trace?.template || '');
+    const template = pickTemplate(scenario, persona.family, used);
     const turn = messages.filter((m) => m.role === 'persona').length + 1;
     const started = Date.now();
     // Honeypot: on the lure turn the persona hands over the decoy login — fixed text, no AI
@@ -104,7 +106,7 @@ export function App() {
     await sleep(Math.max(0, 1500 - (Date.now() - started))); // feel like typing
 
     if (run !== runRef.current) return;
-    const replyText = reply.text.replace(/\{family_member\}/g, 'son');
+    const replyText = reply.text;
     const personaMsg: Msg = {
       id: uid(),
       role: 'persona',
@@ -223,6 +225,9 @@ export function App() {
 
   return (
     <div className="app" id="demo">
+      <div className="app-backdrop" aria-hidden>
+        <WaveField waves={DEMO_WAVES} className="app-waves" />
+      </div>
       <header className="topbar" data-reveal>
         <div>
           <div className="section-eyebrow">● Live demo</div>

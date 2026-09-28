@@ -1,15 +1,19 @@
-// Threat map: plots every honeypot intruder at their approximate (IP-based) location, with a
-// live-updating side list. Opened from the Honeypot card. Dark tiles to match the theme.
+// Threat map: plots every honeypot intruder on a Mapbox map with real place labels. One map
+// morphs between a 3D globe and a flat 2D map (projection swap), both fully labelled. Each
+// intruder gets a coloured dot, its city name, and an honest accuracy circle (IP geolocation is
+// city-level, so we draw the radius rather than pretend to a pin).
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import L from 'leaflet';
-import Globe from 'globe.gl';
+import mapboxgl from 'mapbox-gl';
+import 'mapbox-gl/dist/mapbox-gl.css';
 import { Crosshair, Globe2, Map as MapIcon, ShieldAlert } from 'lucide-react';
-import { fetchHoneypot, DEFAULT_BACKEND } from '../ui/ai';
+import { fetchHoneypot } from '../ui/ai';
 import { IntruderCard } from '../ui/honeypot';
 import { groupIntruders, type HoneypotEvent, type Intruder } from '../shared/honeypot';
 
 const POLL_MS = 2500;
+const TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined;
+
 const SEV_COLOR: Record<Intruder['worst'], string> = {
   info: '#7d8497',
   medium: '#ffb547',
@@ -17,159 +21,155 @@ const SEV_COLOR: Record<Intruder['worst'], string> = {
   critical: '#ff5d6c',
 };
 
-// The "home" HawkGuard node the attack-arcs point back to (India centroid)
-const HUB = { lat: 20.6, lng: 78.96 };
-
-// ─── 3D globe view ────────────────────────────────────────────
-// A dark rotating Earth with a glowing point + pulsing ring per intruder and an animated arc
-// from each back to the hub. World-scale, so it never implies street-level precision.
-function GlobeView({
-  located,
-  selected,
-  onSelect,
-}: {
-  located: Intruder[];
-  selected: string | null;
-  onSelect: (id: string) => void;
-}) {
-  const host = useRef<HTMLDivElement>(null);
-  const globe = useRef<any>(null);
-
-  useEffect(() => {
-    if (!host.current || globe.current) return;
-    const g = new Globe(host.current, { rendererConfig: { antialias: true, alpha: true } })
-      .backgroundColor('rgba(0,0,0,0)')
-      .globeImageUrl('https://unpkg.com/three-globe/example/img/earth-night.jpg')
-      .showAtmosphere(true)
-      .atmosphereColor('#7c82ff')
-      .atmosphereAltitude(0.16)
-      .pointLat('lat').pointLng('lng').pointColor('color').pointAltitude(0.01).pointRadius(0.35).pointLabel('label')
-      .onPointClick((d: any) => onSelect(d.visitor))
-      .ringLat('lat').ringLng('lng').ringColor((d: any) => () => d.color).ringMaxRadius(2.4).ringPropagationSpeed(1.3).ringRepeatPeriod(1300)
-      .arcStartLat('slat').arcStartLng('slng').arcEndLat('elat').arcEndLng('elng')
-      .arcColor('color').arcStroke(0.5).arcDashLength(0.45).arcDashGap(1.1).arcDashAnimateTime(1600).arcAltitudeAutoScale(0.45);
-    g.pointOfView({ lat: 18, lng: 80, altitude: 2.3 });
-
-    // Render at the screen's real pixel density (fixes the soft/blurry look on Retina/HiDPI)
-    g.renderer().setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-
-    const controls = g.controls() as any;
-    controls.autoRotate = true;
-    controls.autoRotateSpeed = 0.5;
-    controls.enableZoom = true;
-    controls.zoomSpeed = 1.1;
-    // Stop zoom at a clean regional view (globe radius is 100). Getting closer only reveals the
-    // texture's resolution limit and blows the markers up, and the data is only city-accurate anyway.
-    controls.minDistance = 165;
-    controls.maxDistance = 500;
-    controls.enableDamping = true;
-
-    // Sharpen the map texture at grazing angles once it has loaded
-    setTimeout(() => {
-      try {
-        const mat: any = g.globeMaterial();
-        const maxAniso = g.renderer().capabilities.getMaxAnisotropy?.() ?? 8;
-        if (mat?.map) {
-          mat.map.anisotropy = maxAniso;
-          mat.map.needsUpdate = true;
-        }
-      } catch {
-        /* texture not ready — harmless */
-      }
-    }, 1800);
-
-    const resize = () => host.current && g.width(host.current.clientWidth).height(host.current.clientHeight);
-    resize();
-    addEventListener('resize', resize);
-    globe.current = g;
-    return () => {
-      removeEventListener('resize', resize);
-      (g as any)._destructor?.();
-      globe.current = null;
-      if (host.current) host.current.innerHTML = '';
-    };
-  }, []);
-
-  // feed data
-  useEffect(() => {
-    const g = globe.current;
-    if (!g) return;
-    const pts = located.map((v) => ({
-      lat: v.geo.lat!,
-      lng: v.geo.lon!,
-      color: SEV_COLOR[v.worst],
-      visitor: v.visitor,
-      label: `${v.device} · ${v.browser} — ${v.geo.label}`,
-    }));
-    const arcs = located.map((v) => ({
-      slat: v.geo.lat!,
-      slng: v.geo.lon!,
-      elat: HUB.lat,
-      elng: HUB.lng,
-      color: [SEV_COLOR[v.worst], '#7c82ff'],
-    }));
-    g.pointsData(pts).ringsData(pts).arcsData(arcs);
-  }, [located]);
-
-  // spin to a selected intruder
-  useEffect(() => {
-    const g = globe.current;
-    const v = located.find((x) => x.visitor === selected);
-    if (g && v) {
-      (g.controls() as any).autoRotate = false;
-      g.pointOfView({ lat: v.geo.lat!, lng: v.geo.lon!, altitude: 1.6 }, 900);
-    }
-  }, [selected, located]);
-
-  return <div ref={host} className="globe-host" />;
-}
-
-// Coloured pin, with a soft glow for the dangerous ones
-function pin(sev: Intruder['worst']) {
-  const c = SEV_COLOR[sev];
-  const glow = sev === 'high' || sev === 'critical';
-  return L.divIcon({
-    className: 'threat-pin',
-    html: `<span style="--c:${c}" class="${glow ? 'glow' : ''}"></span>`,
-    iconSize: [18, 18],
-    iconAnchor: [9, 9],
-  });
-}
-
-// Honest uncertainty for an IP-based fix. An IP locates the ISP's network, not the device,
-// so we never pretend to a pin — we draw the real radius. Mobile/cellular is coarser; a
-// VPN/hosting IP is a datacenter, so the circle marks the server, not the person.
+// Honest uncertainty for an IP-based fix. An IP locates the ISP's network, not the device.
 function accuracy(geo: Intruder['geo']): { radiusM: number; note: string } {
-  if (geo.vpn) return { radiusM: 25000, note: 'VPN / hosting IP — this is the server, not the person' };
+  if (geo.precise) return { radiusM: Math.max(geo.accuracyM || 40, 25), note: 'Precise — consented GPS on this device' };
+  if (geo.vpn) return { radiusM: 25000, note: 'VPN / hosting IP — server, not the person' };
   if (geo.mobile) return { radiusM: 20000, note: 'Mobile network — city-level at best (±~20 km)' };
-  return { radiusM: 5000, note: 'IP / ISP location — city-level (±~5 km), not the exact device' };
+  return { radiusM: 5000, note: 'IP / ISP location — city-level (±~5 km)' };
 }
+
+// A geo-accurate circle polygon (metres → lon/lat ring) so the accuracy radius is truthful on the map
+function circleRing(lng: number, lat: number, radiusM: number, steps = 64): number[][] {
+  const dLat = radiusM / 110574;
+  const dLng = radiusM / (111320 * Math.cos((lat * Math.PI) / 180));
+  const ring: number[][] = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = (i / steps) * 2 * Math.PI;
+    ring.push([lng + dLng * Math.cos(t), lat + dLat * Math.sin(t)]);
+  }
+  return ring;
+}
+
+const shortPlace = (label: string) => (label.split('·').pop() || label).split(',')[0].trim();
 
 export function ThreatMap() {
   const mapEl = useRef<HTMLDivElement>(null);
-  const map = useRef<L.Map | null>(null);
-  const layer = useRef<L.LayerGroup | null>(null);
-  const circles = useRef<Map<string, L.Circle>>(new Map());
+  const map = useRef<mapboxgl.Map | null>(null);
+  const ready = useRef(false);
+  const centered = useRef(false);
   const [intruders, setIntruders] = useState<Intruder[]>([]);
   const [online, setOnline] = useState<boolean | undefined>(undefined);
   const [selected, setSelected] = useState<string | null>(null);
-  const [fitted, setFitted] = useState(false);
   const [view, setView] = useState<'globe' | 'map'>('globe');
 
-  // init map once — only while the 2D map view is mounted
+  const located = useMemo(
+    () => intruders.filter((v) => v.geo.lat !== undefined && v.geo.lon !== undefined),
+    [intruders]
+  );
+
+  // Build GeoJSON for the intruder dots/labels and the accuracy circles
+  const featureData = useMemo(() => {
+    const points: any[] = [];
+    const rings: any[] = [];
+    for (const v of located) {
+      const lng = v.geo.lon!;
+      const lat = v.geo.lat!;
+      const color = SEV_COLOR[v.worst];
+      const { radiusM } = accuracy(v.geo);
+      const props = { visitor: v.visitor, color, place: shortPlace(v.geo.label) };
+      points.push({ type: 'Feature', properties: props, geometry: { type: 'Point', coordinates: [lng, lat] } });
+      rings.push({
+        type: 'Feature',
+        properties: { color },
+        geometry: { type: 'Polygon', coordinates: [circleRing(lng, lat, radiusM)] },
+      });
+    }
+    return {
+      points: { type: 'FeatureCollection', features: points } as any,
+      rings: { type: 'FeatureCollection', features: rings } as any,
+    };
+  }, [located]);
+
+  // ── init the map once ──
   useEffect(() => {
-    if (view !== 'map' || !mapEl.current || map.current) return;
-    const m = L.map(mapEl.current, { worldCopyJump: true, zoomControl: true, attributionControl: false }).setView([22, 79], 4);
-    // Keyless OpenStreetMap tiles, darkened via CSS filter (.leaflet-host) to match the theme — no API key, no watermark
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, subdomains: 'abc' }).addTo(m);
-    layer.current = L.layerGroup().addTo(m);
+    if (!mapEl.current || map.current || !TOKEN) return;
+    mapboxgl.accessToken = TOKEN;
+    const m = new mapboxgl.Map({
+      container: mapEl.current,
+      style: 'mapbox://styles/mapbox/dark-v11', // dark basemap, place labels built in
+      projection: 'globe',
+      center: [78, 20],
+      zoom: 1.4,
+      maxZoom: 18, // Mapbox has real street tiles; the accuracy circle shows the city-level uncertainty
+      attributionControl: false,
+    });
+    m.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-right');
+    m.on('style.load', () => {
+      m.setFog({
+        color: 'rgb(12,14,22)',
+        'high-color': 'rgb(60,50,120)',
+        'horizon-blend': 0.15,
+        'space-color': 'rgb(6,7,12)',
+        'star-intensity': 0.5,
+      });
+    });
+    m.on('load', () => {
+      m.addSource('rings', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      m.addSource('intruders', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      // accuracy circle — outline only (a fill would cover the map when zoomed inside the radius)
+      m.addLayer({ id: 'ring-line', type: 'line', source: 'rings', paint: { 'line-color': ['get', 'color'], 'line-width': 1.5, 'line-opacity': 0.75, 'line-dasharray': [3, 2] } });
+      // glow + dot
+      m.addLayer({ id: 'dot-glow', type: 'circle', source: 'intruders', paint: { 'circle-radius': 16, 'circle-color': ['get', 'color'], 'circle-opacity': 0.18, 'circle-blur': 1 } });
+      m.addLayer({ id: 'dot', type: 'circle', source: 'intruders', paint: { 'circle-radius': 6, 'circle-color': ['get', 'color'], 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.5 } });
+      // city label
+      m.addLayer({
+        id: 'label',
+        type: 'symbol',
+        source: 'intruders',
+        layout: { 'text-field': ['get', 'place'], 'text-size': 13, 'text-offset': [0, -1.4], 'text-anchor': 'bottom', 'text-font': ['DIN Pro Medium', 'Arial Unicode MS Regular'] },
+        paint: { 'text-color': '#e9edff', 'text-halo-color': 'rgba(8,9,12,0.9)', 'text-halo-width': 1.4 },
+      });
+      const pick = (e: mapboxgl.MapMouseEvent) => {
+        const f: any = m.queryRenderedFeatures(e.point, { layers: ['dot'] })[0];
+        if (f) setSelected(f.properties!.visitor);
+      };
+      m.on('click', 'dot', pick);
+      m.on('mouseenter', 'dot', () => (m.getCanvas().style.cursor = 'pointer'));
+      m.on('mouseleave', 'dot', () => (m.getCanvas().style.cursor = ''));
+      ready.current = true;
+      map.current = m;
+      // push any data that arrived before load
+      (m.getSource('intruders') as mapboxgl.GeoJSONSource)?.setData(featureData.points);
+      (m.getSource('rings') as mapboxgl.GeoJSONSource)?.setData(featureData.rings);
+    });
     map.current = m;
     return () => {
       m.remove();
       map.current = null;
-      setFitted(false); // re-fit next time the map view is opened
+      ready.current = false;
     };
+  }, []);
+
+  // ── feed data ──
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !ready.current) return;
+    (m.getSource('intruders') as mapboxgl.GeoJSONSource)?.setData(featureData.points);
+    (m.getSource('rings') as mapboxgl.GeoJSONSource)?.setData(featureData.rings);
+    if (!centered.current && located.length) {
+      centered.current = true;
+      const lng = located.reduce((s, v) => s + v.geo.lon!, 0) / located.length;
+      const lat = located.reduce((s, v) => s + v.geo.lat!, 0) / located.length;
+      m.flyTo({ center: [lng, lat], zoom: 2.2, duration: 1400 });
+    }
+  }, [featureData, located]);
+
+  // ── morph globe ⇄ flat map (native projection swap, instant) ──
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !ready.current) return;
+    m.setProjection(view === 'globe' ? 'globe' : 'mercator');
   }, [view]);
+
+  // ── fly to a selected intruder ──
+  useEffect(() => {
+    const m = map.current;
+    const v = located.find((x) => x.visitor === selected);
+    if (m && ready.current && v) m.flyTo({ center: [v.geo.lon!, v.geo.lat!], zoom: 5, duration: 900 });
+  }, [selected, located]);
+
+  const loggedIn = intruders.filter((v) => v.loggedIn).length;
 
   // poll the honeypot log
   useEffect(() => {
@@ -187,68 +187,6 @@ export function ThreatMap() {
       clearInterval(t);
     };
   }, []);
-
-  const located = useMemo(
-    () => intruders.filter((v) => v.geo.lat !== undefined && v.geo.lon !== undefined),
-    [intruders]
-  );
-
-  // redraw markers + honest accuracy circles
-  useEffect(() => {
-    if (!map.current || !layer.current) return;
-    layer.current.clearLayers();
-    circles.current.clear();
-    let bounds: L.LatLngBounds | null = null;
-    // slight spread so intruders sharing one city (or the same Wi-Fi) don't stack into one dot
-    const seen = new Map<string, number>();
-    for (const v of located) {
-      const key = `${v.geo.lat},${v.geo.lon}`;
-      const n = seen.get(key) || 0;
-      seen.set(key, n + 1);
-      const jitter = n === 0 ? 0 : 0.03 * n;
-      const lat = v.geo.lat! + jitter;
-      const lon = v.geo.lon! + jitter;
-      const c = SEV_COLOR[v.worst];
-      const { radiusM, note } = accuracy(v.geo);
-
-      // The circle IS the location claim — everything inside is "somewhere in here", not the pin
-      const circle = L.circle([lat, lon], {
-        radius: radiusM,
-        color: c,
-        weight: 1,
-        opacity: 0.55,
-        fillColor: c,
-        fillOpacity: 0.1,
-        dashArray: v.geo.vpn ? '4 4' : undefined,
-        interactive: false,
-      }).addTo(layer.current!);
-      circles.current.set(v.visitor, circle);
-      // getBounds() returns a fresh object each call, so seeding/extending with it is safe
-      bounds = bounds ? bounds.extend(circle.getBounds()) : circle.getBounds();
-
-      L.marker([lat, lon], { icon: pin(v.worst) })
-        .addTo(layer.current!)
-        .on('click', () => setSelected(v.visitor))
-        .bindTooltip(
-          `<b>${v.device} · ${v.browser}</b><br>${v.ip}<br>${v.geo.label}` +
-            `<br><span style="opacity:.7">${note}</span>` +
-            (v.loggedIn ? '<br><b style="color:#ff5d6c">logged in to decoy</b>' : ''),
-          { className: 'threat-tip', direction: 'top', offset: [0, -8] }
-        );
-    }
-    if (bounds && !fitted) {
-      map.current.fitBounds(bounds.pad(0.25), { maxZoom: 11 });
-      setFitted(true);
-    }
-  }, [located, fitted, view]);
-
-  // fly to a selected intruder — frame their accuracy circle, never zoom past it into false precision
-  useEffect(() => {
-    const circle = selected ? circles.current.get(selected) : undefined;
-    if (circle && map.current) map.current.flyToBounds(circle.getBounds().pad(0.6), { duration: 0.6, maxZoom: 12 });
-  }, [selected, located]);
-
-  const loggedIn = intruders.filter((v) => v.loggedIn).length;
 
   return (
     <div className="map-page">
@@ -294,9 +232,7 @@ export function ThreatMap() {
 
         <div className="map-list">
           {intruders.length === 0 ? (
-            <div className="empty">
-              No intruders yet. When a scammer opens the decoy login, they appear here.
-            </div>
+            <div className="empty">No intruders yet. When a scammer opens the decoy login, they appear here.</div>
           ) : (
             intruders.map((v) => (
               <div key={v.visitor}>
@@ -312,28 +248,17 @@ export function ThreatMap() {
         </div>
 
         <p className="map-note">
-          {view === 'globe' ? (
-            <>
-              Each point is an intruder; the arc runs to the HawkGuard node. Positions are <b>approximate</b> — from the
-              visitor's IP, city/ISP-level (±~5 km) and coarser on mobile, not the exact device. Drag to spin, scroll to
-              zoom, click a point to focus. Switch to <b>Map</b> for the exact uncertainty radius.
-            </>
-          ) : (
-            <>
-              The <b>circle is the location claim</b>, not the dot: the intruder is somewhere inside it. Fixes come from
-              the visitor's IP — city/ISP-level (±~5 km), coarser on mobile, and a dashed circle means a VPN or hosting
-              IP, so it marks the server, not the person. Precise (50–100 m) location would need the device's GPS with
-              consent.
-            </>
-          )}
+          The <b>circle is the location claim</b>, not the dot: the intruder is somewhere inside it. Fixes come from the
+          visitor's IP — city/ISP-level (±~5 km), coarser on mobile. A tight circle means the visitor allowed the browser's
+          GPS prompt, giving a precise (tens of metres) fix. Toggle <b>Globe</b> / <b>Map</b> to morph the same view.
         </p>
       </aside>
 
       <div className="map-canvas">
-        {view === 'globe' ? (
-          <GlobeView located={located} selected={selected} onSelect={setSelected} />
+        {TOKEN ? (
+          <div ref={mapEl} className="mapbox-host" />
         ) : (
-          <div ref={mapEl} className="leaflet-host" />
+          <div className="map-overlay">Set VITE_MAPBOX_TOKEN in extension/.env to load the map.</div>
         )}
         {online && located.length === 0 && intruders.length > 0 && (
           <div className="map-overlay">Intruders are on a local network — no public location to plot yet.</div>
