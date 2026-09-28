@@ -87,11 +87,34 @@ export interface ThreatReport {
   intruders?: import('./honeypot').Intruder[]; // honeypot visitors captured during this engagement
 }
 
+export interface LinkMetadata {
+  href: string;
+  label: string;
+}
+
+export interface FormMetadata {
+  fields: string[];
+  action: string;
+  method: string;
+  buttonText: string;
+  labelText: string;
+  contextText?: string;
+  contextScope?: 'fieldset' | 'form' | 'local' | 'group' | 'section' | 'article' | 'none';
+}
+
+export interface PageAnalysisContext {
+  referenceContent?: boolean;
+  credentialForm?: boolean;
+  links?: string[];
+  linkMetadata?: LinkMetadata[];
+  forms?: FormMetadata[];
+}
+
 export type PanelStage = 'evidence' | 'persona' | 'engage' | 'report';
 
 // Message types across extension surfaces
 export type ExtMessage =
-  | { kind: 'ANALYZE_PAGE'; payload: { url: string; text: string; html: string; context?: { referenceContent?: boolean; credentialForm?: boolean; links?: string[] } } }
+  | { kind: 'ANALYZE_PAGE'; payload: { url: string; text: string; html: string; context?: PageAnalysisContext } }
   | { kind: 'ANALYSIS_RESULT'; payload: ScamAnalysis }
   | { kind: 'ANALYZE_TEXT'; payload: { text: string } }
   | { kind: 'START_ENGAGEMENT'; payload: { analysisId: string; personaId: string; initialContext: string } }

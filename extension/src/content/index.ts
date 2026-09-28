@@ -1,6 +1,6 @@
 // HawkGuard content script — silent DOM observer that pings the background.
 
-import type { ScamAnalysis, PanelStage } from '../shared/types';
+import type { ScamAnalysis, PanelStage, FormMetadata, PageAnalysisContext } from '../shared/types';
 
 const BANNER_ID = 'hawkguard-alert-banner';
 const STYLE_ID = 'hawkguard-alert-style';
@@ -30,9 +30,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-function extractPageData(): { text: string; context: { referenceContent: boolean; credentialForm: boolean; links: string[] } } {
+function extractPageData(): { text: string; context: PageAnalysisContext } {
   const root = document.querySelector('main, [role="main"], article') || document.body;
-  if (!root) return { text: '', context: { referenceContent: false, credentialForm: false, links: [] } };
+  if (!root) return { text: '', context: { referenceContent: false, credentialForm: false, links: [], linkMetadata: [], forms: [] } };
 
   const ignored = 'script, style, noscript, svg, code, pre, kbd, nav, footer, [hidden], [aria-hidden="true"], [contenteditable]:not([contenteditable="false"]), #hawkguard-alert-banner';
   const isVisible = (el: Element) => {
@@ -40,7 +40,13 @@ function extractPageData(): { text: string; context: { referenceContent: boolean
     const style = getComputedStyle(el);
     return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse';
   };
-  const parts: string[] = [];
+  const textUnits: string[] = [];
+  let currentUnit: Element | null = null;
+  let currentUnitParts: string[] = [];
+  const flushTextUnit = () => {
+    if (currentUnitParts.length) textUnits.push(currentUnitParts.join(' '));
+    currentUnitParts = [];
+  };
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => {
       const parent = node.parentElement;
@@ -51,14 +57,23 @@ function extractPageData(): { text: string; context: { referenceContent: boolean
   });
   let n: Node | null;
   let capturedLength = 0;
+  let capturedNodes = 0;
+  const blockSelector = 'p, li, h1, h2, h3, h4, h5, h6, blockquote, label, button, td, th, figcaption, summary, dt, dd, legend, div';
   while ((n = walker.nextNode())) {
     const part = (n.textContent || '').trim();
     if (!part) continue;
+    const parent = n.parentElement!;
+    const unit = parent.closest(blockSelector) || parent;
+    if (currentUnit && unit !== currentUnit) flushTextUnit();
+    currentUnit = unit;
+    currentUnitParts.push(part);
     const remaining = 12000 - capturedLength;
-    parts.push(part.slice(0, remaining));
+    currentUnitParts[currentUnitParts.length - 1] = part.slice(0, remaining);
     capturedLength += Math.min(part.length, remaining);
-    if (parts.length >= 600 || capturedLength >= 12000) break;
+    capturedNodes++;
+    if (capturedNodes >= 600 || capturedLength >= 12000) break;
   }
+  flushTextUnit();
 
   const pageTitle = document.title.trim();
   const description = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
@@ -67,39 +82,165 @@ function extractPageData(): { text: string; context: { referenceContent: boolean
     .slice(0, 50)
     .map((el) => el.getAttribute('alt') || el.getAttribute('aria-label') || '')
     .filter(Boolean);
-  const text = [pageTitle, description, ...parts, ...brandMetadata].filter(Boolean).join(' ').slice(0, 12000);
-  const credentialForm = Array.from(document.querySelectorAll('input, textarea, select')).some((el) => {
-    if (!isVisible(el)) return false;
-    const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
-    const type = input instanceof HTMLInputElement ? input.type.toLowerCase() : '';
-    if (type === 'hidden') return false;
-    const descriptor = [
-      type,
-      input.getAttribute('placeholder') || '',
-      input.getAttribute('aria-label') || '',
-      input.getAttribute('name') || '',
-      input.id || '',
-    ].join(' ');
-    return /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan)/i.test(descriptor);
-  });
+  const text = [pageTitle, description, ...textUnits, ...brandMetadata].filter(Boolean).join('\n').slice(0, 12000);
+  const safeUrl = (raw: string): string => {
+    try {
+      const parsed = new URL(raw, location.href);
+      if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+      parsed.username = '';
+      parsed.password = '';
+      parsed.search = '';
+      parsed.hash = '';
+      return parsed.toString();
+    } catch {
+      return '';
+    }
+  };
+  const staticContextText = (container: Element, limit = 600): string => {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => {
+        const parent = node.parentElement;
+        if (!parent || parent.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [hidden], [aria-hidden="true"]') || !isVisible(parent)) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return (node.textContent || '').trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      },
+    });
+    const parts: string[] = [];
+    let node: Node | null;
+    let length = 0;
+    while ((node = walker.nextNode()) && length < limit) {
+      const part = (node.textContent || '').trim();
+      parts.push(part.slice(0, limit - length));
+      length += part.length;
+    }
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+  };
+  const formContext = (form: Element): { text: string; scope: NonNullable<FormMetadata['contextScope']> } => {
+    const sensitiveFieldPattern = /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|cc-(?:number|exp(?:-month|-year)?|csc))/i;
+    const fieldsets = Array.from(form.querySelectorAll('fieldset'));
+    const fieldset = fieldsets.find((candidate) =>
+      Array.from(candidate.querySelectorAll('input, textarea, select')).some((el) => {
+        const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+        if (input instanceof HTMLInputElement && input.type.toLowerCase() === 'hidden') return false;
+        return sensitiveFieldPattern.test([
+          input instanceof HTMLInputElement ? input.type : '',
+          input.getAttribute('autocomplete') || '',
+          input.getAttribute('placeholder') || '',
+          input.getAttribute('aria-label') || '',
+          input.getAttribute('name') || '',
+          input.id || '',
+        ].join(' '));
+      })
+    );
+    if (fieldset) return { text: staticContextText(fieldset), scope: 'fieldset' };
 
-  const links = Array.from(document.querySelectorAll('a[href]'))
+    const localContainer = form.parentElement;
+    const formSpecificChildren = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LABEL', 'LEGEND', 'BUTTON']);
+    if (localContainer
+      && localContainer.tagName === 'DIV'
+      && localContainer.querySelectorAll('form').length === 1
+      && Array.from(localContainer.children).every((child) => child === form || formSpecificChildren.has(child.tagName))
+      && !localContainer.matches('section, article, [role="group"]')) {
+      return { text: staticContextText(localContainer), scope: 'local' };
+    }
+
+    const group = form.querySelector('[role="group"]') || form.closest('[role="group"]');
+    if (group) return { text: staticContextText(group), scope: 'group' };
+
+    return { text: staticContextText(form), scope: 'form' };
+  };
+  const forms: FormMetadata[] = Array.from(document.querySelectorAll('form'))
+    .filter(isVisible)
+    .slice(0, 12)
+    .map((form) => {
+      const fields = Array.from(form.querySelectorAll('input, textarea, select'))
+        .filter(isVisible)
+        .map((el) => {
+          const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+          const type = input instanceof HTMLInputElement ? input.type.toLowerCase() : '';
+          if (type === 'hidden') return '';
+          const descriptor = [
+            type,
+            input.getAttribute('autocomplete') || '',
+            input.getAttribute('placeholder') || '',
+            input.getAttribute('aria-label') || '',
+            input.getAttribute('name') || '',
+            input.id || '',
+            input.labels ? Array.from(input.labels).map((label) => label.textContent || '').join(' ') : '',
+            input.closest('label')?.textContent || '',
+          ].join(' ').replace(/\s+/g, ' ').trim();
+          return /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|email|username|cc-(?:number|exp(?:-month|-year)?|csc))/i.test(descriptor)
+            ? descriptor.slice(0, 180)
+            : '';
+        })
+        .filter(Boolean)
+        .slice(0, 12);
+      const formButtons = Array.from(form.querySelectorAll('button, input[type="submit"], [role="button"]'))
+        .filter(isVisible)
+        .map((button) => button instanceof HTMLInputElement
+          ? button.getAttribute('value') || button.getAttribute('aria-label') || ''
+          : button.textContent || button.getAttribute('aria-label') || '')
+        .join(' ').replace(/\s+/g, ' ').trim().slice(0, 240);
+      const formLabels = Array.from(form.querySelectorAll('label'))
+        .filter(isVisible)
+        .map((label) => label.textContent || '')
+        .join(' ').replace(/\s+/g, ' ').trim().slice(0, 400);
+      const localContext = formContext(form);
+      const broadContext = form.closest('section, article');
+      return {
+        fields,
+        action: safeUrl((form as HTMLFormElement).action || location.href),
+        method: ((form as HTMLFormElement).method || 'get').toLowerCase(),
+        buttonText: formButtons,
+        labelText: formLabels,
+        contextText: localContext.text || (broadContext ? staticContextText(broadContext) : ''),
+        contextScope: localContext.text ? localContext.scope : broadContext?.tagName.toLowerCase() as 'section' | 'article' || 'none',
+      };
+    });
+  const standaloneSensitiveFields = Array.from(document.querySelectorAll('input, textarea, select'))
+    .filter((el) => !el.closest('form') && isVisible(el))
+    .map((el) => {
+      const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+      const type = input instanceof HTMLInputElement ? input.type.toLowerCase() : '';
+      if (type === 'hidden') return '';
+      const descriptor = [
+        type,
+        input.getAttribute('autocomplete') || '',
+        input.getAttribute('placeholder') || '',
+        input.getAttribute('aria-label') || '',
+        input.getAttribute('name') || '',
+        input.id || '',
+      ].join(' ').replace(/\s+/g, ' ').trim();
+      return /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|cc-(?:number|exp(?:-month|-year)?|csc))/i.test(descriptor)
+        ? descriptor.slice(0, 180)
+        : '';
+    })
+    .filter(Boolean)
+    .slice(0, 12);
+  if (standaloneSensitiveFields.length) {
+    forms.push({
+      fields: standaloneSensitiveFields,
+      action: safeUrl(location.href),
+      method: 'get',
+      buttonText: '',
+      labelText: '',
+    });
+  }
+  const credentialForm = forms.some((form) =>
+    form.fields.some((field) => /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|cc-(?:number|exp(?:-month|-year)?|csc))/i.test(field))
+  );
+
+  const linkMetadata = Array.from(document.querySelectorAll('a[href]'))
     .filter(isVisible)
     .slice(0, 30)
     .map((el) => {
-      try {
-        const link = new URL((el as HTMLAnchorElement).href, location.href);
-        if (!['http:', 'https:'].includes(link.protocol)) return '';
-        link.username = '';
-        link.password = '';
-        link.search = '';
-        link.hash = '';
-        return link.toString();
-      } catch {
-        return '';
-      }
+      const anchor = el as HTMLAnchorElement;
+      const href = safeUrl(anchor.href);
+      return href ? { href, label: (anchor.innerText || anchor.getAttribute('aria-label') || anchor.title || '').replace(/\s+/g, ' ').trim().slice(0, 200) } : null;
     })
-    .filter(Boolean);
+    .filter((link): link is { href: string; label: string } => link !== null);
+  const links = linkMetadata.map((link) => link.href);
 
   const codeLength = Array.from(root.querySelectorAll('pre, code'))
     .reduce((total, el) => total + (el.textContent?.length || 0), 0);
@@ -114,6 +255,8 @@ function extractPageData(): { text: string; context: { referenceContent: boolean
       referenceContent: pathLooksDocumentary || codeHeavy,
       credentialForm,
       links,
+      linkMetadata,
+      forms,
     },
   };
 }

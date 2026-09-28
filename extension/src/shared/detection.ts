@@ -6,12 +6,14 @@
 // SMS / warnings / transaction alerts, plus link + domain checks. Leetspeak is de-obfuscated
 // before matching. Domain age (RDAP) is an optional async check used by the live page scanner.
 
-import type { ForensicFinding, ScamAnalysis, Severity } from './types';
+import type { ForensicFinding, ScamAnalysis, Severity, FormMetadata, LinkMetadata } from './types';
 
 export interface AnalysisContext {
   referenceContent?: boolean;
   credentialForm?: boolean;
   links?: string[];
+  linkMetadata?: LinkMetadata[];
+  forms?: FormMetadata[];
   trustedCredentialSite?: boolean;
 }
 
@@ -100,6 +102,8 @@ function detectionText(text: string): string {
 // ── Building blocks ──────────────────────────────────────────
 const ASK = '(?:please\\s+|kindly\\s+)*(?:share|send|give|tell|provide|enter|submit|verify|confirm|read\\s*out|forward|resend|reply\\s*with|type|update|renew|reactivate)';
 const CRED = '(?:otp|one[\\s-]?time[\\s-]?password|cvv|c\\.v\\.v|\\bpin\\b|mpin|upi\\s*pin|password|passcode|aadhaar(?:\\s*(?:card|number))?|pan(?:\\s*(?:card|number))?|kyc|card\\s*(?:number|details)|(?:bank\\s*)?account\\s*(?:number|details)|net\\s*banking)';
+const SENSITIVE_FIELD_PATTERN = /(?:password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|cc-(?:number|exp(?:-month|-year)?|csc))/i;
+const PAYMENT_FIELD_PATTERN = /(?:cvv|c\.v\.v|card|cc-(?:number|exp(?:-month|-year)?|csc))/i;
 
 // Positive categories. Each match adds `weight`; the finding's own severity drives display colour.
 interface Cat { key: string; title: string; detail: string; severity: Severity; weight: number; res: RegExp[]; }
@@ -480,12 +484,10 @@ export function analyzeContent(text: string, context: AnalysisContext = {}): { s
 const SUSPICIOUS_TLDS = ['.xyz', '.top', '.tk', '.ml', '.ga', '.cf', '.gq', '.click', '.buzz', '.rest', '.cyou'];
 const LOWER_SIGNAL_TLDS = ['.link', '.info', '.live', '.online', '.shop', '.work'];
 const SHORTENERS = /\b(bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|cutt\.ly|rebrand\.ly|ow\.ly|shorturl\.at|rb\.gy|t\.ly)\b/i;
-const BRAND_LOOKALIKE = /(sbi|hdfc|icici|axis|kotak|paytm|phonepe|gpay|amazon|amzn|flipkart|myntra|netflix|google|apple|microsoft|whatsapp|npci|uidai|irctc)[-_]/i;
-const DOMAIN_BRANDS = ['paypal', 'sbi', 'hdfc', 'icici', 'axis', 'kotak', 'paytm', 'phonepe', 'amazon', 'flipkart', 'netflix', 'google', 'apple', 'microsoft', 'whatsapp', 'npci', 'uidai'];
 const BRAND_DOMAIN_RULES = [
-  { name: 'PayPal', pattern: /\bpaypal\b/i, domains: ['paypal.com'] },
+  { name: 'PayPal', pattern: /\bpaypal\b/i, domains: ['paypal.com', 'paypal.co.uk', 'paypal.com.au', 'paypal.ca', 'paypal.de', 'paypal.fr', 'paypal.it', 'paypal.es', 'paypal.jp'] },
 
-  { name: 'SBI', pattern: /\bsbi\b|state\s+bank\s+of\s+india/i, domains: ['sbi.bank.in', 'sbi.co.in'] },
+  { name: 'SBI', pattern: /\bsbi\b|state\s+bank\s+of\s+india/i, domains: ['sbi.bank.in', 'sbi.co.in', 'onlinesbi.sbi'] },
   { name: 'HDFC Bank', pattern: /\bhdfc\b/i, domains: ['hdfc.bank.in', 'hdfcbank.com'] },
   { name: 'ICICI Bank', pattern: /\bicici\b/i, domains: ['icici.bank.in', 'icicibank.com'] },
   { name: 'Axis Bank', pattern: /\baxis\s+bank\b/i, domains: ['axis.bank.in', 'axisbank.com'] },
@@ -495,14 +497,14 @@ const BRAND_DOMAIN_RULES = [
   { name: 'Paytm', pattern: /\bpaytm\b/i, domains: ['paytm.com'] },
   { name: 'PhonePe', pattern: /\bphonepe\b/i, domains: ['phonepe.com'] },
 
-  { name: 'Amazon', pattern: /\bamazon\b/i, domains: ['amazon.com', 'amazon.in'] },
+  { name: 'Amazon', pattern: /\bamazon\b/i, domains: ['amazon.com', 'amazon.in', 'amazon.co.uk', 'amazon.com.au', 'amazon.ca', 'amazon.de', 'amazon.fr', 'amazon.co.jp'] },
   { name: 'Flipkart', pattern: /\bflipkart\b/i, domains: ['flipkart.com'] },
   { name: 'Myntra', pattern: /\bmyntra\b/i, domains: ['myntra.com'] },
   { name: 'Netflix', pattern: /\bnetflix\b/i, domains: ['netflix.com'] },
 
   { name: 'WhatsApp', pattern: /\bwhatsapp\b/i, domains: ['whatsapp.com'] },
-  { name: 'Google', pattern: /\bgoogle\b/i, domains: ['google.com'] },
-  { name: 'Google Pay', pattern: /\bgpay\b|\bgoogle\s+pay\b/i, domains: ['google.com', 'pay.google.com'] },
+  { name: 'Google', pattern: /\bgoogle\b/i, domains: ['google.com', 'google.co.uk', 'google.co.in', 'google.com.au', 'google.ca', 'google.de', 'google.fr', 'google.co.jp', 'google.co.nz', 'google.com.br'] },
+  { name: 'Google Pay', pattern: /\bgpay\b|\bgoogle\s+pay\b/i, domains: ['google.com', 'pay.google.com', 'google.co.in'] },
   { name: 'Apple', pattern: /\bapple\b/i, domains: ['apple.com'] },
   { name: 'Microsoft', pattern: /\bmicrosoft\b/i, domains: ['microsoft.com'] },
   { name: 'Instagram', pattern: /\binstagram\b/i, domains: ['instagram.com'] },
@@ -512,53 +514,130 @@ const BRAND_DOMAIN_RULES = [
   { name: 'NPCI', pattern: /\bnpci\b/i, domains: ['npci.org.in'] },
   { name: 'IRCTC', pattern: /\birctc\b/i, domains: ['irctc.co.in'] },
 ];
-function detectBrandDomainMismatch(
-  hostname: string,
-  text: string,
-  findings: ForensicFinding[]
-): { brand: string; domain: string } | null {
-  const suspiciousActivity = findings.some((f) =>
-    [
-      'Credential solicitation',
-      'Payment demand',
-      'Click-the-link bait',
-      'Fake refund / cashback bait',
-      'Account block/expiry threat',
-    ].includes(f.title)
-  );
+const BRAND_DOMAIN_ALIASES: Record<string, string[]> = {
+  SBI: ['onlinesbi'],
+};
+function brandRuleForText(text: string) {
+  return BRAND_DOMAIN_RULES.find((rule) => rule.pattern.test(text));
+}
 
-  if (!suspiciousActivity) return null;
-
-  const domain = canonicalHostname(hostname);
-  const asciiDomain = toAsciiHostname(hostname);
-
-  for (const rule of BRAND_DOMAIN_RULES) {
-    if (!rule.pattern.test(text)) continue;
-
-    const belongsToBrand = rule.domains.some(
-      (officialDomain) =>
-        asciiDomain === officialDomain ||
-        asciiDomain.endsWith(`.${officialDomain}`)
-    );
-
-    if (!belongsToBrand) {
-      return {
-        brand: rule.name,
-        domain,
-      };
-    }
-  }
-
-  return null;
+function isOfficialDomainForBrand(hostname: string, rule: typeof BRAND_DOMAIN_RULES[number]): boolean {
+  const domain = toAsciiHostname(hostname);
+  return rule.domains.some((official) => domain === official || domain.endsWith(`.${official}`));
 }
 
 function isOfficialBrandDomain(hostname: string, text: string): boolean {
-  const domain = toAsciiHostname(hostname);
   return BRAND_DOMAIN_RULES.some((rule) =>
-    rule.pattern.test(text) && rule.domains.some((official) =>
-      domain === official || domain.endsWith(`.${official}`)
-    )
+    rule.pattern.test(text) && isOfficialDomainForBrand(hostname, rule)
   );
+}
+
+function editDistanceAtMostOne(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    if (++edits > 1) return false;
+    if (a.length > b.length) i++;
+    else if (b.length > a.length) j++;
+    else {
+      i++;
+      j++;
+    }
+  }
+  return edits + Number(i < a.length || j < b.length) <= 1;
+}
+
+function brandHostnameEvidence(hostname: string, rule?: typeof BRAND_DOMAIN_RULES[number]): string[] {
+  const allowedRules = rule ? [rule] : BRAND_DOMAIN_RULES;
+  const labels = canonicalHostname(hostname).split('.');
+  const candidates = labels.flatMap((label) => normalizeConfusables(label).split('-').filter(Boolean).map((token) => token.replace(/1/g, 'l').replace(/0/g, 'o')));
+  const joinedLabels = labels.map((label) => normalizeConfusables(label).replace(/-/g, '').replace(/1/g, 'l').replace(/0/g, 'o'));
+  const matched: string[] = [];
+  for (const brandRule of allowedRules) {
+    const brand = brandRule.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const aliases = (BRAND_DOMAIN_ALIASES[brandRule.name] || []).map((alias) => alias.toLowerCase());
+    const official = isOfficialDomainForBrand(hostname, brandRule);
+    const exactOrTypo = candidates.some((candidate) => editDistanceAtMostOne(candidate, brand));
+    const deceptiveSuffix = joinedLabels.some((label) =>
+      [brand, ...aliases].some((name) =>
+        label.startsWith(name) && label.length > name.length
+          && /^(?:login|secure|security|verify|account|support|service|online|payment|signin|update|bank|-)/.test(label.slice(name.length))
+      )
+    );
+    const separatedBrandClaim = labels.some((label) =>
+      [brand, ...aliases].some((name) => label.startsWith(`${name}-`) || label === name)
+    );
+    const hyphenJoinedBrand = joinedLabels.some((label) =>
+      [brand, ...aliases].some((name) => label.startsWith(name) && label !== name)
+    );
+    if (!official && (exactOrTypo || deceptiveSuffix || separatedBrandClaim || hyphenJoinedBrand)) matched.push(brandRule.name);
+  }
+  return matched;
+}
+
+function detectBrandDomainMismatch(
+  hostname: string,
+  text: string,
+  findings: ForensicFinding[],
+  context: AnalysisContext,
+): { brand: string; domain: string; strong: boolean }[] {
+  const mismatches: { brand: string; domain: string; strong: boolean }[] = [];
+  const pageDomain = getDomainParts(hostname).registrableDomain;
+  const actionableTitles = new Set([
+    'Credential solicitation', 'Payment demand', 'Click-the-link bait',
+    'Fake refund / cashback bait', 'Account block/expiry threat',
+  ]);
+  const hasActionableFinding = findings.some((finding) => actionableTitles.has(finding.title));
+  const trustedProviders = ['stripe.com', 'paypal.com', 'adyen.com', 'checkout.com', 'google.com', 'microsoftonline.com'];
+
+  for (const rule of BRAND_DOMAIN_RULES) {
+    if (isOfficialDomainForBrand(hostname, rule)) continue;
+    const hostnameClaim = brandHostnameEvidence(hostname, rule).length > 0;
+    let strong = false;
+    for (const form of context.forms || []) {
+      if (!form.fields.some((field) => SENSITIVE_FIELD_PATTERN.test(field))) continue;
+      const directFormText = [form.buttonText, form.labelText, ...form.fields].filter(Boolean).join('\n');
+      const localText = form.contextScope === 'section' || form.contextScope === 'article'
+        ? directFormText
+        : [form.contextText, directFormText].filter(Boolean).join('\n');
+      const localBrandClaim = rule.pattern.test(localText)
+        && /\b(?:login|log\s*in|sign[ -]?in|verify|verification|account|password|passcode|otp|pin|cvv|card|suspended|blocked|restore|reactivate)\b/i.test(localText);
+      if (!localBrandClaim) continue;
+      if (hostnameClaim) {
+        strong = true;
+        break;
+      }
+
+      const destination = hostFromUrl(cleanUrl(form.action));
+      if (!destination) continue;
+      const destinationDomain = getDomainParts(destination).registrableDomain;
+      if (!destinationDomain || destinationDomain === pageDomain
+        || trustedProviders.some((provider) => destinationDomain === provider || destinationDomain.endsWith(`.${provider}`))) continue;
+      const destinationSignals = analyzeDomain(destination, 'link').findings;
+      if (brandHostnameEvidence(destination, rule).length > 0
+        || destinationSignals.some((finding) => ['Suspicious TLD', 'URL shortener', 'Raw IP address'].includes(finding.title))) {
+        strong = true;
+        break;
+      }
+    }
+
+    const relatedTextAction = text.split('\n').some((line) =>
+      rule.pattern.test(line)
+        && /\b(?:share|send|give|enter|submit|verify|update|log\s*in|login|sign[ -]?in|suspended|blocked|restore|reactivate)\b/i.test(line)
+        && /\b(?:account|password|passcode|otp|pin|cvv|card|payment|refund|kyc)\b/i.test(line)
+    );
+    if (strong || (hasActionableFinding && relatedTextAction)) {
+      mismatches.push({ brand: rule.name, domain: canonicalHostname(hostname), strong });
+    }
+  }
+  return mismatches;
 }
 
 function decodePunycodeLabel(label: string): string {
@@ -652,30 +731,32 @@ export function analyzeDomain(hostname: string, source: 'page' | 'link' = 'page'
   };
 
   if (SUSPICIOUS_TLDS.some((t) => normalizedHostname.endsWith(t)))
-    add('Suspicious TLD', 'caution', 'Top-level domain is disproportionately used by short-lived phishing pages; this is a supporting signal only.', 15, `Uncommon TLD (${where.toLowerCase()})`);
+    add('Suspicious TLD', 'unknown', 'Top-level domain is disproportionately used by short-lived phishing pages; this is a supporting signal only.', 12, `Uncommon TLD (${where.toLowerCase()})`);
   else if (LOWER_SIGNAL_TLDS.some((t) => normalizedHostname.endsWith(t)))
-    add('Less-common TLD', 'unknown', 'This top-level domain is less common but is not suspicious by itself.', 6, `Less-common TLD (${where.toLowerCase()})`);
-  const labels = normalizedHostname.split('.');
-  const suspiciousBrandLabel = labels.some((label) => {
-    const folded = normalizeConfusables(decodePunycodeLabel(label));
-    return DOMAIN_BRANDS.some((brand) =>
-      (hasMixedScriptToken(decodePunycodeLabel(label)) && folded === brand)
-        || (folded !== brand && (folded.startsWith(`${brand}-`) || folded.startsWith(`${brand}login`)
-        || folded.startsWith(`${brand}secure`) || folded.startsWith(`${brand}verify`)
-        || folded.endsWith(`-${brand}`) || folded.endsWith(`${brand}login`)))
-    );
-  });
-  if (BRAND_LOOKALIKE.test(normalizedHostname) || suspiciousBrandLabel)
-    add('Brand-lookalike domain', 'threat', 'A hostname label imitates a known brand with deceptive additions or IDN characters.', 25, 'Domain mimics a known brand');
+    add('Less-common TLD', 'unknown', 'This top-level domain is less common but is not suspicious by itself.', 4, `Less-common TLD (${where.toLowerCase()})`);
+  const brandEvidence = brandHostnameEvidence(normalizedHostname);
+  if (brandEvidence.length)
+    add('Brand-lookalike domain', 'unknown', 'A hostname label resembles a known brand; this is a supporting signal until page identity or activity corroborates it.', 8, 'Potential brand-lookalike hostname');
   if (SHORTENERS.test(normalizedHostname))
-    add('URL shortener', 'caution', 'Shortened links hide the real destination and are common in phishing.', 15, 'Shortened link hides destination');
+    add('URL shortener', 'unknown', 'Shortened links obscure their destination; this is supporting evidence only.', 8, 'Shortened link hides destination');
   if ((normalizedHostname.match(/-/g) || []).length > 2)
-    add('Hyphen-heavy hostname', 'caution', 'Many hyphens often spell out a brand in a fake domain.', 10, 'Excessive hyphens in hostname');
+    add('Hyphen-heavy hostname', 'unknown', 'Many hyphens can obscure a hostname; this is supporting evidence only.', 4, 'Excessive hyphens in hostname');
   const octets = normalizedHostname.split('.');
   if (octets.length === 4 && octets.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255))
-    add('Raw IP address', 'threat', 'Legitimate services use a domain name, not a raw IP.', 30, 'Raw IP address in URL');
+    add('Raw IP address', 'unknown', 'A raw IP address is unusual for a public login/payment site; this is supporting evidence only.', 10, 'Raw IP address in URL');
 
-  return { score: Math.min(score, 100), findings, reasons };
+  return { score: Math.min(score, 18), findings, reasons };
+}
+
+function hostnameInfrastructureScore(findings: ForensicFinding[]): number {
+  const weights: Record<string, number> = {
+    'Suspicious TLD': 12,
+    'Less-common TLD': 4,
+    'URL shortener': 8,
+    'Hyphen-heavy hostname': 4,
+    'Raw IP address': 10,
+  };
+  return findings.reduce((total, finding) => total + (weights[finding.title] || 0), 0);
 }
 
 // Domains that legitimately use punycode / long labels shouldn't be re-flagged endlessly
@@ -723,7 +804,7 @@ function cleanUrl(value: string): string {
   }
 }
 
-function analyzeLinks(text: string, linkUrls: string[] = [], pageHostname = ''): { score: number; findings: ForensicFinding[]; reasons: string[] } {
+function analyzeLinks(text: string, linkUrls: string[] = [], pageHostname = '', linkMetadata: LinkMetadata[] = []): { score: number; findings: ForensicFinding[]; reasons: string[] } {
   const urls = Array.from(new Set([
     ...urlsInText(text),
     ...linkUrls,
@@ -752,7 +833,95 @@ function analyzeLinks(text: string, linkUrls: string[] = [], pageHostname = ''):
     findings.push(...r.findings);
     reasons.push(...r.reasons);
   }
-  return { score: Math.min(score, 25), findings, reasons };
+  for (const link of linkMetadata.slice(0, 30)) {
+    const rule = brandRuleForText(link.label);
+    if (!rule) continue;
+    const href = hostFromUrl(cleanUrl(link.href));
+    if (!href || isOfficialDomainForBrand(href, rule)) continue;
+    const destination = analyzeDomain(href, 'link');
+    const identityText = /\b(?:login|log\s*in|sign[ -]?in|account|verification|verify|support|payment|wallet)\b/i.test(link.label);
+    const riskyDestination = brandHostnameEvidence(href, rule).length > 0
+      || destination.findings.some((finding) => ['Suspicious TLD', 'URL shortener', 'Raw IP address'].includes(finding.title));
+    if (!identityText || !riskyDestination) continue;
+    score += 16;
+    reasons.push(`${rule.name} link points to a suspicious destination`);
+    findings.push({
+      id: crypto.randomUUID(),
+      category: 'domain',
+      title: 'Brand-destination mismatch',
+      severity: 'caution',
+      detail: `A link presented as ${rule.name} login or account content points to a non-official suspicious destination.`,
+      evidence: { brand: rule.name, hostname: canonicalHostname(href), label: link.label.slice(0, 100) },
+      timestamp: Date.now(),
+    });
+  }
+  return { score: Math.min(score, 20), findings, reasons };
+}
+
+function sensitiveFields(forms: FormMetadata[] = []): string[] {
+  return Array.from(new Set(forms.flatMap((form) => form.fields).filter((field) =>
+    SENSITIVE_FIELD_PATTERN.test(field)
+  ))).slice(0, 20);
+}
+
+function formSignals(forms: FormMetadata[] = [], pageUrl: string): { score: number; findings: ForensicFinding[]; reasons: string[]; fields: string[]; externalDestinations: string[]; paymentFields: boolean } {
+  const fields = sensitiveFields(forms);
+  const findings: ForensicFinding[] = [];
+  const reasons: string[] = [];
+  const externalDestinations = new Set<string>();
+  let score = 0;
+  if (fields.length) {
+    score += 3;
+    reasons.push('Sensitive form fields detected');
+    findings.push({
+      id: crypto.randomUUID(),
+      category: 'content',
+      title: 'Sensitive form fields',
+      severity: 'unknown',
+      detail: 'The page contains fields whose labels or metadata indicate sensitive information; entered values are not inspected.',
+      evidence: { fieldCount: fields.length, fieldTypes: Array.from(new Set(fields.map((field) =>
+        field.match(SENSITIVE_FIELD_PATTERN)?.[0].toLowerCase() || 'sensitive'
+      ))).join(', ') },
+      timestamp: Date.now(),
+    });
+  }
+  let pageOrigin = '';
+  try {
+    pageOrigin = new URL(pageUrl).origin;
+  } catch {}
+  for (const form of forms) {
+    if (!form.fields.some((field) => SENSITIVE_FIELD_PATTERN.test(field))) continue;
+    let action: URL;
+    try {
+      action = new URL(form.action || pageUrl, pageUrl);
+      if (!['http:', 'https:'].includes(action.protocol)) continue;
+    } catch {
+      continue;
+    }
+    if (!pageOrigin || action.origin === pageOrigin) continue;
+    const destinationHost = canonicalHostname(action.hostname);
+    const destinationDomain = getDomainParts(destinationHost).registrableDomain;
+    const pageDomain = getDomainParts(new URL(pageUrl).hostname).registrableDomain;
+    if (!destinationDomain || destinationDomain === pageDomain) continue;
+    const trustedPaymentProviders = ['stripe.com', 'paypal.com', 'adyen.com', 'checkout.com', 'google.com', 'microsoftonline.com'];
+    if (trustedPaymentProviders.some((provider) => destinationDomain === provider || destinationDomain.endsWith(`.${provider}`))) continue;
+    externalDestinations.add(destinationHost);
+  }
+  if (externalDestinations.size) {
+    score += 12;
+    reasons.push('Sensitive form submits to an unrelated external destination');
+    findings.push({
+      id: crypto.randomUUID(),
+      category: 'domain',
+      title: 'Sensitive form external destination',
+      severity: 'caution',
+      detail: 'A form with sensitive fields submits to an unrelated external host; external processing can be legitimate, so this is supporting evidence.',
+      evidence: { destinations: Array.from(externalDestinations).slice(0, 3).join(', ') },
+      timestamp: Date.now(),
+    });
+  }
+  const paymentFields = fields.some((field) => PAYMENT_FIELD_PATTERN.test(field));
+  return { score, findings, reasons, fields, externalDestinations: Array.from(externalDestinations), paymentFields };
 }
 
 export function classifySeverity(score: number): Severity {
@@ -775,61 +944,71 @@ export function runFullAnalysis(url: string, text: string, context: AnalysisCont
   try {
     asciiHostname = new URL(url).hostname;
   } catch {}
-  const trustedCredentialSite = !!(isRealPage && context.credentialForm && isOfficialBrandDomain(asciiHostname, normalizedText));
-  const content = analyzeContent(text, { ...context, referenceContent, trustedCredentialSite });
-  const links = analyzeLinks(text, context.links, hostname);
+  const detectedSensitiveForm = !!context.credentialForm || sensitiveFields(context.forms).length > 0;
+  const trustedCredentialSite = !!(isRealPage && detectedSensitiveForm && isOfficialBrandDomain(asciiHostname, normalizedText));
+  const content = analyzeContent(text, { ...context, credentialForm: detectedSensitiveForm, trustedCredentialSite });
+  const links = analyzeLinks(text, context.links, hostname, context.linkMetadata);
   const domain = isRealPage ? analyzeDomain(hostname, 'page') : { score: 0, findings: [], reasons: [] };
+  const forms = formSignals(context.forms, url);
   if (isRealPage) {
-  const mismatch = detectBrandDomainMismatch(
-    hostname,
-    normalizedText,
-    content.findings
-  );
-
-  if (mismatch) {
-    domain.score += 25;
-    domain.reasons.push(
-      `${mismatch.brand} mentioned on non-${mismatch.brand} domain`
-    );
-
-    domain.findings.push({
-      id: crypto.randomUUID(),
-      category: 'domain',
-      title: 'Brand-domain mismatch',
-      severity: 'threat',
-      detail: `The page references ${mismatch.brand}, but the current domain is ${mismatch.domain}, not an official ${mismatch.brand} domain.`,
-      evidence: {
-        hostname,
-        brand: mismatch.brand,
-      },
-      timestamp: Date.now(),
-    });
+    const mismatches = detectBrandDomainMismatch(hostname, normalizedText, content.findings, { ...context, credentialForm: detectedSensitiveForm });
+    if (mismatches.length) {
+      const strongMismatch = mismatches.some((mismatch) => mismatch.strong);
+      const identityScore = strongMismatch ? 38 : 14;
+      const infrastructureScore = Math.min(hostnameInfrastructureScore(domain.findings), strongMismatch ? 4 : 6);
+      domain.score = identityScore + infrastructureScore;
+      domain.reasons.push(`${mismatches.map((mismatch) => mismatch.brand).join(', ')} identity does not match the page domain`);
+      if (infrastructureScore) {
+        domain.reasons.push(`Hostname infrastructure evidence grouped and capped at ${infrastructureScore} points`);
+      }
+      for (const mismatch of mismatches) {
+        domain.findings.push({
+          id: crypto.randomUUID(),
+          category: 'domain',
+          title: 'Brand-domain mismatch',
+          severity: mismatch.strong ? 'threat' : 'caution',
+          detail: `The page presents ${mismatch.brand} account or verification identity on ${mismatch.domain}, which is not an official ${mismatch.brand} domain.`,
+          evidence: { hostname, brand: mismatch.brand, registrableDomain: getDomainParts(hostname).registrableDomain },
+          timestamp: Date.now(),
+        });
+        if (mismatch.strong) {
+          domain.findings.push({
+            id: crypto.randomUUID(),
+            category: 'domain',
+            title: 'Brand impersonation with sensitive form',
+            severity: 'threat',
+            detail: 'A non-official domain claims a known brand identity while requesting sensitive information.',
+            evidence: { brand: mismatch.brand, fieldCount: forms.fields.length },
+            timestamp: Date.now(),
+          });
+        }
+      }
+    }
+    if (forms.paymentFields && content.findings.some((finding) =>
+      ['Payment demand', 'Fake refund / cashback bait', 'QR-code payment deception'].includes(finding.title)
+    )) {
+      forms.score += 14;
+      forms.reasons.push('Payment lure paired with card/CVV form fields');
+      forms.findings.push({
+        id: crypto.randomUUID(),
+        category: 'content',
+        title: 'Payment lure with card form',
+        severity: 'threat',
+        detail: 'A payment or refund lure appears alongside card or CVV fields.',
+        evidence: { fieldCount: forms.fields.length },
+        timestamp: Date.now(),
+      });
+    }
   }
-}
-  if (isRealPage && context.credentialForm && domain.findings.some((f) =>
-    f.title === 'Suspicious TLD' || f.title === 'Brand-lookalike domain' || f.title === 'Raw IP address'
-  )) {
-    domain.score += 15;
-    domain.reasons.push('Sensitive-data form on a suspicious domain');
-    domain.findings.push({
-      id: crypto.randomUUID(),
-      category: 'domain',
-      title: 'Sensitive-data form on suspicious domain',
-      severity: 'threat',
-      detail: 'This page requests sensitive information while using a domain with phishing-associated characteristics.',
-      evidence: { hostname },
-      timestamp: Date.now(),
-    });
-  }
-  const combinedScore = Math.min(content.score + links.score + domain.score, 100);
+  const combinedScore = Math.min(content.score + links.score + domain.score + forms.score, 100);
 
   return {
     url,
     hostname: hostname || 'message',
     overallSeverity: classifySeverity(combinedScore),
     score: combinedScore,
-    findings: [...content.findings, ...domain.findings, ...links.findings],
-    suspicionReasons: [...content.reasons, ...domain.reasons, ...links.reasons],
+    findings: [...content.findings, ...domain.findings, ...links.findings, ...forms.findings],
+    suspicionReasons: [...content.reasons, ...domain.reasons, ...links.reasons, ...forms.reasons],
     timestamp: Date.now(),
   };
 }
@@ -848,8 +1027,10 @@ export async function checkDomainAge(hostname: string): Promise<ForensicFinding 
   const normalized = hostname.toLowerCase().replace(/\.$/, '');
   const octets = normalized.split('.');
   if (!normalized || (octets.length === 4 && octets.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255))
-    || (normalized.startsWith('[') && normalized.endsWith(']'))) return null;
+    || (normalized.startsWith('[') && normalized.endsWith(']'))
+    || !normalized.includes('.') || /\.(?:local|localhost|test)$/i.test(normalized)) return null;
   const domain = registrableDomain(normalized);
+  if (!domain || !domain.includes('.')) return null;
   const cached = ageCache.get(domain);
   if (cached && cached.expiresAt > Date.now()) return cached.finding;
   const pending = ageRequests.get(domain);

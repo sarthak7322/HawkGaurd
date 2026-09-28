@@ -214,6 +214,16 @@ assertCase('legitimate brand subdomain is not a lookalike',
   runFullAnalysis('https://login.hdfcbank.com/', 'HDFC Bank login.').findings.every((f) => f.title !== 'Brand-lookalike domain'));
 assertCase('deceptive brand subdomain is detected',
   runFullAnalysis('https://hdfcbank.com.attacker.xyz/', 'HDFC Bank: share your OTP now.').findings.some((f) => f.title === 'Brand-domain mismatch'));
+assertCase('brand-owned subdomain remains legitimate',
+  runFullAnalysis('https://login.paypal.com/', 'PayPal account sign in.', { credentialForm: true }).findings.every((finding) => finding.title !== 'Brand-domain mismatch'));
+assertCase('paypal.example.com does not inherit PayPal ownership',
+  runFullAnalysis('https://paypal.example.com/login', 'PayPal account login', {
+    forms: [{ fields: ['password'], action: 'https://paypal.example.com/login', method: 'post', buttonText: 'Sign in', labelText: 'PayPal account password' }],
+  }).findings.some((finding) => finding.title === 'Brand-domain mismatch'));
+assertCase('paypal.com.example.com is not treated as PayPal-owned',
+  runFullAnalysis('https://paypal.com.example.com/login', 'PayPal account login', {
+    forms: [{ fields: ['password'], action: 'https://paypal.com.example.com/login', method: 'post', buttonText: 'Sign in', labelText: 'PayPal account password' }],
+  }).findings.some((finding) => finding.title === 'Brand-domain mismatch'));
 const parsedDomainParts = getDomainParts('login.example.co.in.');
 assertCase('hostname, subdomain, and registrable domain are separated',
   parsedDomainParts.hostname === 'login.example.co.in' && parsedDomainParts.subdomain === 'login' && parsedDomainParts.registrableDomain === 'example.co.in');
@@ -233,6 +243,375 @@ assertCase('suspicious lookalike subdomain of the current site is analyzed',
   runFullAnalysis('https://www.example.com/', '', { links: ['https://paypal-login.example.com/account'] }).findings.some((finding) => finding.title === 'Brand-lookalike domain'));
 assertCase('unrelated external domain remains analyzed',
   runFullAnalysis('https://www.example.com/', '', { links: ['https://attacker.xyz/login'] }).findings.some((finding) => finding.title === 'Suspicious TLD'));
+assertCase('shortener alone remains supporting evidence',
+  runFullAnalysis('https://message.example/', 'Open https://bit.ly/abc').findings.some((finding) => finding.title === 'URL shortener')
+    && runFullAnalysis('https://message.example/', 'Open https://bit.ly/abc').overallSeverity !== 'threat');
+assertCase('raw IP destination remains supporting evidence',
+  runFullAnalysis('https://message.example/', 'Open https://192.0.2.1/login').findings.some((finding) => finding.title === 'Raw IP address')
+    && runFullAnalysis('https://message.example/', 'Open https://192.0.2.1/login').overallSeverity !== 'threat');
+assertCase('punycode lookalike hostname is detected',
+  runFullAnalysis(new URL('https://pаypal.example/login').href, 'PayPal account login: share your password.', {
+    credentialForm: true,
+    forms: [{ fields: ['password'], action: 'https://pаypal.example/collect', method: 'post', buttonText: 'Sign in', labelText: 'PayPal account password' }],
+  }).findings.some((finding) => finding.title === 'Brand-domain mismatch'));
+
+console.log('Branch 2 domain, form, and scoring regressions:');
+assertCase('legitimate PayPal domain with login form remains low risk',
+  runFullAnalysis('https://www.paypal.com/signin', 'PayPal account sign in.', {
+    credentialForm: true,
+    forms: [{ fields: ['password current-password'], action: 'https://www.paypal.com/signin', method: 'post', buttonText: 'Log in', labelText: 'Password' }],
+  }).score < 12);
+assertCase('legitimate regional Google domain is recognized as brand-owned',
+  runFullAnalysis('https://accounts.google.co.uk/signin', 'Google account sign in.', {
+    forms: [{ fields: ['password'], action: 'https://accounts.google.co.uk/signin', method: 'post', buttonText: 'Next', labelText: 'Password' }],
+  }).findings.every((finding) => finding.title !== 'Brand-domain mismatch'));
+for (const hostname of ['onlinesbi.sbi', 'sbi.co.in', 'sbi.bank.in']) {
+  const sbiLogin = runFullAnalysis(`https://${hostname}/login`, 'SBI account login', {
+    credentialForm: true,
+    forms: [{ fields: ['password current-password'], action: `https://${hostname}/login`, method: 'post', buttonText: 'Login', labelText: 'SBI account password' }],
+  });
+  assertCase(`legitimate SBI domain ${hostname} remains low risk`,
+    sbiLogin.score < 12 && sbiLogin.findings.every((finding) => finding.title !== 'Brand-domain mismatch'));
+}
+for (const hostname of ['sbi-login-example.com', 'onlinesbi-example.com']) {
+  const sbiLookalike = runFullAnalysis(`https://${hostname}/login`, 'SBI account login: enter your password.', {
+    credentialForm: true,
+    forms: [{ fields: ['password'], action: `https://${hostname}/collect`, method: 'post', buttonText: 'Login', labelText: 'SBI account password' }],
+  });
+  assertCase(`${hostname} is not trusted as SBI infrastructure`,
+    sbiLookalike.findings.some((finding) => finding.title === 'Brand-domain mismatch')
+      && sbiLookalike.overallSeverity === 'threat');
+}
+assertCase('legitimate PayPal mention in an article is not a brand mismatch',
+  runFullAnalysis('https://example.com/article', 'Read about PayPal account security and payment protection.').findings.every((finding) => finding.title !== 'Brand-domain mismatch'));
+assertCase('legitimate Google mention is not domain impersonation',
+  runFullAnalysis('https://example.org/news', 'Google announced a new product today.').findings.every((finding) => finding.title !== 'Brand-domain mismatch'));
+assertCase('legitimate bank mention is not domain impersonation',
+  runFullAnalysis('https://finance.example.org/article', 'The bank compared HDFC and SBI interest rates.').findings.every((finding) => finding.title !== 'Brand-domain mismatch'));
+assertCase('hyphenated PayPal lookalike is supporting evidence without page activity',
+  runFullAnalysis('https://paypal-security-example.com/', 'Welcome to the online information page.').score < 20
+    && runFullAnalysis('https://paypal-security-example.com/', 'Welcome to the online information page.').overallSeverity !== 'threat');
+assertCase('single-character PayPal substitution is detected conservatively',
+  runFullAnalysis('https://paypa1.com/', 'PayPal account login: share your password.', {
+    credentialForm: true,
+    forms: [{ fields: ['password'], action: 'https://paypa1.com/collect', method: 'post', buttonText: 'Sign in', labelText: 'PayPal account password' }],
+  }).findings.some((finding) => finding.title === 'Brand-domain mismatch' || finding.title === 'Brand impersonation with sensitive form'));
+assertCase('Google lookalike with account activity is detected',
+  runFullAnalysis('https://google-security-login.example/', 'Google account verification: send your password now.', {
+    credentialForm: true,
+    forms: [{ fields: ['password'], action: 'https://google-security-login.example/collect', method: 'post', buttonText: 'Sign in', labelText: 'Google account password' }],
+  }).findings.some((finding) => finding.title === 'Brand-domain mismatch'));
+const unrelatedPaypalForm = runFullAnalysis(
+  'https://example.com/article',
+  'PayPal account security information\nWeekly newsletter',
+  { forms: [{ fields: ['password'], action: 'https://example.com/newsletter', method: 'post', buttonText: 'Subscribe', labelText: 'Newsletter password' }] },
+);
+assertCase('static PayPal wording plus unrelated password form is not impersonation',
+  unrelatedPaypalForm.score < 12
+    && unrelatedPaypalForm.findings.every((finding) => finding.title !== 'Brand-domain mismatch' && finding.title !== 'Brand impersonation with sensitive form'));
+const unrelatedPaypalSuspiciousForm = runFullAnalysis(
+  'https://example.com/article',
+  'PayPal account security information\nWeekly newsletter',
+  { forms: [{ fields: ['password'], action: 'https://collector.example.xyz/submit', method: 'post', buttonText: 'Continue', labelText: 'Newsletter password' }] },
+);
+assertCase('unrelated PayPal mention plus suspicious sensitive form is not impersonation',
+  unrelatedPaypalSuspiciousForm.findings.every((finding) => finding.title !== 'Brand-domain mismatch' && finding.title !== 'Brand impersonation with sensitive form'));
+const articleContextPaypalForm = runFullAnalysis(
+  'https://paypal-security-example.com/article',
+  '',
+  { forms: [{
+    fields: ['password'],
+    action: 'https://paypal-security-example.com/session',
+    method: 'post',
+    buttonText: 'Subscribe',
+    labelText: 'Newsletter password',
+    contextText: 'PayPal account security is important. Subscribe to our newsletter.',
+    contextScope: 'section',
+  }] },
+);
+assertCase('article PayPal wording in broad section does not claim unrelated password form',
+  articleContextPaypalForm.findings.every((finding) => finding.title !== 'Brand impersonation with sensitive form'));
+const articleContextPaypalSuspiciousForm = runFullAnalysis(
+  'https://paypal-security-example.com/article',
+  '',
+  { forms: [{
+    fields: ['password'],
+    action: 'https://collector.example.xyz/submit',
+    method: 'post',
+    buttonText: 'Continue',
+    labelText: 'Newsletter password',
+    contextText: 'PayPal account security is important. Subscribe to our newsletter.',
+    contextScope: 'article',
+  }] },
+);
+assertCase('article PayPal wording does not combine with unrelated suspicious form destination',
+  articleContextPaypalSuspiciousForm.findings.every((finding) => finding.title !== 'Brand impersonation with sensitive form'));
+const articleWithLoginForm = runFullAnalysis(
+  'https://example.com/article',
+  'This article discusses PayPal account security and payment protection.\nSign up for our newsletter.',
+  { forms: [{ fields: ['password'], action: 'https://example.com/newsletter', method: 'post', buttonText: 'Sign up', labelText: 'Newsletter password' }] },
+);
+assertCase('PayPal article mention with unrelated normal login form remains low risk',
+  articleWithLoginForm.score < 12
+    && articleWithLoginForm.findings.every((finding) => finding.title !== 'Brand-domain mismatch'));
+const paypalVerifyForm = runFullAnalysis('https://paypal-security-example.com/login', 'Verify your PayPal account', {
+  credentialForm: true,
+  forms: [{ fields: ['password', 'cc-number'], action: 'https://random-example.xyz/collect', method: 'post', buttonText: 'Verify account', labelText: 'PayPal account password card number' }],
+});
+assertCase('Verify PayPal account with sensitive fields and unrelated destination is strong',
+  paypalVerifyForm.overallSeverity === 'threat'
+    && paypalVerifyForm.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form')
+    && paypalVerifyForm.findings.some((finding) => finding.title === 'Sensitive form external destination'));
+const suspendedPaypalForm = runFullAnalysis(
+  'https://paypal-security-example.com/login',
+  'PayPal account suspended. Verify your account.',
+  { forms: [{ fields: ['password'], action: 'https://collector.example.xyz/submit', method: 'post', buttonText: 'Verify', labelText: 'PayPal account password' }] },
+);
+assertCase('PayPal suspension claim, verification action, and credential form is strong',
+  suspendedPaypalForm.overallSeverity === 'threat'
+    && suspendedPaypalForm.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form'));
+const sectionLinkedPaypalForm = runFullAnalysis(
+  'https://paypal-security-example.com/login',
+  'Verify your PayPal account',
+  { forms: [{
+    fields: ['password', 'card number'],
+    action: 'https://collector.example.xyz/submit',
+    method: 'post',
+    buttonText: 'Verify account',
+    labelText: 'Password card number',
+    contextText: 'Verify your PayPal account',
+  }] },
+);
+assertCase('same-section PayPal claim, sensitive form, and suspicious action is strong',
+  sectionLinkedPaypalForm.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form')
+    && sectionLinkedPaypalForm.overallSeverity === 'threat');
+const hdfcBeforePaypalForm = runFullAnalysis(
+  'https://paypal-security-example.com/login',
+  'HDFC Bank offers account security guidance.',
+  { forms: [{
+    fields: ['password'],
+    action: 'https://collector.example.xyz/submit',
+    method: 'post',
+    buttonText: 'Verify',
+    labelText: 'PayPal account password',
+    contextText: 'Verify your PayPal account',
+    contextScope: 'fieldset',
+  }] },
+);
+assertCase('HDFC mention before related PayPal form does not mask PayPal mismatch',
+  hdfcBeforePaypalForm.findings.some((finding) => finding.title === 'Brand-domain mismatch' && finding.evidence?.brand === 'PayPal')
+    && hdfcBeforePaypalForm.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form' && finding.evidence?.brand === 'PayPal'));
+const paypalMentionHdfcForm = runFullAnalysis(
+  'https://paypal-security-example.com/login',
+  'PayPal is discussed in this unrelated article.',
+  { forms: [{
+    fields: ['password'],
+    action: 'https://paypal-security-example.com/session',
+    method: 'post',
+    buttonText: 'Sign in',
+    labelText: 'HDFC Bank account password',
+    contextText: 'Sign in to your HDFC Bank account',
+    contextScope: 'fieldset',
+  }] },
+);
+assertCase('unrelated PayPal mention does not associate an HDFC form with PayPal',
+  paypalMentionHdfcForm.findings.every((finding) => finding.title !== 'Brand-domain mismatch' || finding.evidence?.brand !== 'PayPal'));
+assertCase('multiple legitimate brand mentions on official PayPal login remain safe',
+  runFullAnalysis('https://www.paypal.com/signin',
+    'HDFC Bank and PayPal account security information.',
+    { forms: [{ fields: ['password'], action: 'https://www.paypal.com/signin', method: 'post', buttonText: 'Log in', labelText: 'PayPal account password', contextText: 'PayPal sign in', contextScope: 'form' }] },
+  ).findings.every((finding) => finding.title !== 'Brand-domain mismatch' && finding.title !== 'Brand impersonation with sensitive form'));
+const longPaypalReferencePage = runFullAnalysis(
+  'https://news.example.org/research',
+  `${'This reference article discusses PayPal security history and online payment safety. '.repeat(24)}\nSign in to our unrelated account`,
+  {
+    referenceContent: true,
+    forms: [{ fields: ['email', 'password'], action: 'https://news.example.org/session', method: 'post', buttonText: 'Sign in', labelText: 'Account password' }],
+    links: ['https://unrelated.example.net/about', 'https://docs.example.org/security'],
+  },
+);
+assertCase('long PayPal reference page with unrelated login and external links stays low risk',
+  longPaypalReferencePage.score < 12
+    && longPaypalReferencePage.findings.every((finding) => finding.title !== 'Brand-domain mismatch' && finding.title !== 'Brand impersonation with sensitive form'));
+const paypalLinkTextAnalysis = runFullAnalysis('https://news.example.com/', 'Read about PayPal', {
+  linkMetadata: [{ href: 'https://example.com/articles/paypal', label: 'Read about PayPal' }],
+});
+assertCase('informational PayPal anchor to ordinary external page is not mismatched',
+  paypalLinkTextAnalysis.findings.every((finding) => finding.title !== 'Brand-destination mismatch'));
+const paypalLoginLinkAnalysis = runFullAnalysis('https://news.example.com/', 'Login to PayPal', {
+  linkMetadata: [{ href: 'https://paypal-security-example.xyz/login', label: 'Login to PayPal' }],
+});
+assertCase('PayPal login anchor to deceptive destination creates a mismatch signal',
+  paypalLoginLinkAnalysis.findings.some((finding) => finding.title === 'Brand-destination mismatch')
+    && paypalLoginLinkAnalysis.overallSeverity !== 'threat');
+
+const passwordOnly = runFullAnalysis('https://login.example.com/', 'Sign in to continue.', {
+  credentialForm: true,
+  forms: [{ fields: ['password current-password'], action: 'https://login.example.com/session', method: 'post', buttonText: 'Sign in', labelText: 'Password' }],
+});
+assertCase('password field alone remains weak evidence',
+  passwordOnly.score < 12 && passwordOnly.overallSeverity === 'safe');
+const suspiciousPaypalForm = runFullAnalysis('https://paypal-security-example.com/login', 'PayPal account verification', {
+  credentialForm: true,
+  forms: [{ fields: ['email username', 'password current-password', 'card number', 'CVV'], action: 'https://random-example.xyz/collect', method: 'post', buttonText: 'Verify account', labelText: 'PayPal email password card security code' }],
+});
+assertCase('PayPal identity plus sensitive form and unrelated action is high-confidence',
+  suspiciousPaypalForm.overallSeverity === 'threat'
+    && suspiciousPaypalForm.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form')
+    && suspiciousPaypalForm.findings.some((finding) => finding.title === 'Sensitive form external destination'));
+const suspiciousExternalForm = runFullAnalysis('https://shop.example.com/checkout', 'Checkout', {
+  forms: [{ fields: ['password'], action: 'https://collector.example.xyz/submit', method: 'post', buttonText: 'Continue', labelText: 'Password' }],
+});
+assertCase('sensitive form to unrelated external host is supporting evidence',
+  suspiciousExternalForm.findings.some((finding) => finding.title === 'Sensitive form external destination')
+    && suspiciousExternalForm.overallSeverity !== 'threat');
+const trustedPaymentForm = runFullAnalysis('https://shop.example.com/checkout', 'Secure checkout', {
+  forms: [{ fields: ['card number', 'CVV'], action: 'https://checkout.stripe.com/pay', method: 'post', buttonText: 'Pay', labelText: 'Card number security code' }],
+});
+assertCase('legitimate external payment provider is not treated as suspicious action',
+  trustedPaymentForm.findings.every((finding) => finding.title !== 'Sensitive form external destination'));
+assertCase('same-origin sensitive form action is not suspicious',
+  runFullAnalysis('https://account.example.com/login', 'Sign in', {
+    forms: [{ fields: ['password'], action: 'https://account.example.com/auth', method: 'post', buttonText: 'Sign in', labelText: 'Password' }],
+  }).findings.every((finding) => finding.title !== 'Sensitive form external destination'));
+const cardAutocomplete = runFullAnalysis('https://shop.example.com/payment', 'Secure checkout', {
+  forms: [{
+    fields: ['autocomplete cc-number', 'autocomplete cc-exp', 'autocomplete cc-exp-month', 'autocomplete cc-exp-year', 'autocomplete cc-csc'],
+    action: 'https://shop.example.com/payment',
+    method: 'post',
+    buttonText: 'Pay',
+    labelText: 'Card information',
+  }],
+});
+assertCase('card autocomplete metadata is detected structurally without a threat by itself',
+  cardAutocomplete.score < 12
+    && cardAutocomplete.findings.some((finding) => finding.title === 'Sensitive form fields' && finding.evidence?.fieldCount === 5));
+const legitimateAutocompletePayment = runFullAnalysis('https://shop.example.com/checkout', 'Secure checkout', {
+  forms: [{
+    fields: ['autocomplete cc-number', 'autocomplete cc-exp', 'autocomplete cc-csc'],
+    action: 'https://checkout.stripe.com/pay',
+    method: 'post',
+    buttonText: 'Pay',
+    labelText: 'Card number expiration security code',
+  }],
+});
+assertCase('legitimate external payment provider with card autocomplete remains low risk',
+  legitimateAutocompletePayment.score < 12
+    && legitimateAutocompletePayment.findings.every((finding) => finding.title !== 'Sensitive form external destination'));
+const suspiciousAutocompletePayment = runFullAnalysis('https://refund.example.com/claim', 'Pay a processing fee to receive your refund.', {
+  forms: [{
+    fields: ['autocomplete cc-number', 'autocomplete cc-exp', 'autocomplete cc-csc'],
+    action: 'https://collector.example.xyz/submit',
+    method: 'post',
+    buttonText: 'Claim refund',
+    labelText: 'Card number expiration security code',
+  }],
+});
+assertCase('suspicious external payment action with card autocomplete is detected',
+  suspiciousAutocompletePayment.findings.some((finding) => finding.title === 'Sensitive form external destination')
+    && suspiciousAutocompletePayment.findings.some((finding) => finding.title === 'Payment lure with card form')
+    && suspiciousAutocompletePayment.overallSeverity === 'threat');
+const cardRefundForm = runFullAnalysis('https://refund.example.com/', 'Pay a processing fee to receive your refund.', {
+  forms: [{ fields: ['card number', 'CVV'], action: 'https://refund.example.com/claim', method: 'post', buttonText: 'Claim refund', labelText: 'Card number CVV' }],
+});
+assertCase('card/CVV form reinforces a payment/refund scam',
+  cardRefundForm.overallSeverity === 'threat' && cardRefundForm.findings.some((finding) => finding.title === 'Payment lure with card form'));
+assertCase('OTP account threat plus suspicious host becomes high risk',
+  runFullAnalysis('https://paypal-login.xyz/', 'PayPal account is blocked. Share your OTP now.', {
+    credentialForm: true,
+    forms: [{ fields: ['one-time-code', 'password'], action: 'https://collector.example.xyz/submit', method: 'post', buttonText: 'Verify', labelText: 'PayPal account OTP' }],
+  }).overallSeverity === 'threat');
+assertCase('domain infrastructure signals do not create a threat alone',
+  runFullAnalysis('https://paypal-security-example.xyz/', 'Welcome.').overallSeverity !== 'threat');
+const lookalikeOnly = runFullAnalysis('https://paypal-security-example.com/', 'Welcome to our information page.');
+assertCase('lookalike domain alone remains a supporting signal',
+  lookalikeOnly.score <= 18 && lookalikeOnly.findings.some((finding) => finding.title === 'Brand-lookalike domain'));
+const mismatchOnly = runFullAnalysis(
+  'https://example.com/security',
+  'PayPal account suspended. Click here to verify.',
+);
+const lookalikeAndMismatch = runFullAnalysis(
+  'https://paypal-security-example.com/security',
+  'PayPal account suspended. Click here to verify.',
+);
+assertCase('brand/domain mismatch without a sensitive form is supporting evidence',
+  mismatchOnly.findings.some((finding) => finding.title === 'Brand-domain mismatch')
+    && mismatchOnly.findings.every((finding) => finding.title !== 'Brand impersonation with sensitive form'));
+assertCase('lookalike plus brand mismatch does not add the same hostname evidence twice',
+  lookalikeAndMismatch.findings.some((finding) => finding.title === 'Brand-domain mismatch')
+    && lookalikeAndMismatch.score <= mismatchOnly.score + 2);
+const mismatchSuspiciousTld = runFullAnalysis(
+  'https://paypal-security-example.xyz/login',
+  'PayPal account suspended. Click here to verify.',
+);
+assertCase('brand mismatch groups suspicious TLD infrastructure within a bounded score',
+  mismatchSuspiciousTld.findings.some((finding) => finding.title === 'Brand-domain mismatch')
+    && mismatchSuspiciousTld.score <= mismatchOnly.score + 8);
+const mismatchHyphenHost = runFullAnalysis(
+  'https://paypal-security-example-secure-account.com/login',
+  'PayPal account suspended. Click here to verify.',
+);
+assertCase('brand mismatch groups hyphen-heavy hostname evidence within a bounded score',
+  mismatchHyphenHost.findings.some((finding) => finding.title === 'Brand-domain mismatch')
+    && mismatchHyphenHost.score <= mismatchOnly.score + 8);
+const mismatchWithCredentialForm = runFullAnalysis(
+  'https://paypal-security-example.com/login',
+  'Verify your PayPal account',
+  { forms: [{
+    fields: ['password'],
+    action: 'https://paypal-security-example.com/login',
+    method: 'post',
+    buttonText: 'Verify',
+    labelText: 'PayPal account password',
+    contextText: 'Verify your PayPal account',
+  }] },
+);
+assertCase('brand mismatch plus a related credential form reaches high risk',
+  mismatchWithCredentialForm.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form')
+    && mismatchWithCredentialForm.score >= 40);
+const mismatchCredentialThreat = runFullAnalysis(
+  'https://paypal-security-example.com/login',
+  'PayPal account suspended. Verify your account.',
+  { forms: [{
+    fields: ['password'],
+    action: 'https://collector.example.xyz/submit',
+    method: 'post',
+    buttonText: 'Verify',
+    labelText: 'PayPal account password',
+    contextText: 'PayPal account suspended. Verify your account.',
+  }] },
+);
+assertCase('brand mismatch, related credential form, and account threat add independent evidence',
+  mismatchCredentialThreat.score > mismatchWithCredentialForm.score
+    && mismatchCredentialThreat.overallSeverity === 'threat');
+const infrastructureWithUnrelatedMention = runFullAnalysis(
+  'https://unrelated-domain.xyz/',
+  'This article contains PayPal account security information.',
+);
+assertCase('infrastructure and an unrelated brand mention do not create impersonation or excessive risk',
+  infrastructureWithUnrelatedMention.score <= 18
+    && infrastructureWithUnrelatedMention.findings.every((finding) => finding.title !== 'Brand-domain mismatch' && finding.title !== 'Brand impersonation with sensitive form'));
+const rawIpCredentialForm = runFullAnalysis('http://192.0.2.1/login', 'Sign in to continue.', {
+  forms: [{ fields: ['password'], action: 'http://192.0.2.1/login', method: 'post', buttonText: 'Sign in', labelText: 'Password' }],
+});
+assertCase('raw IP plus a credential form remains supporting evidence without other scam context',
+  rawIpCredentialForm.findings.some((finding) => finding.title === 'Raw IP address')
+    && rawIpCredentialForm.overallSeverity !== 'threat');
+const duplicateUrgency = runFullAnalysis('https://message.example/', 'Urgent urgent urgent! Act now immediately within 2 hours!');
+assertCase('repeated urgency language remains score-capped',
+  duplicateUrgency.score <= 6);
+assertCase('lookalike plus suspicious TLD remains capped as one weak infrastructure group',
+  runFullAnalysis('https://paypal-security-example.xyz/', 'Welcome to the information page.').score <= 18);
+const paypalDemoPattern = runFullAnalysis('https://paypal-security-example.com/login', 'PayPal account verification', {
+  credentialForm: true,
+  forms: [{ fields: ['email', 'password', 'card number', 'CVV'], action: 'https://random-example.xyz/collect', method: 'post', buttonText: 'Continue', labelText: 'PayPal account verification' }],
+});
+const legitimatePaypalPattern = runFullAnalysis('https://www.paypal.com/signin', 'PayPal account sign in', {
+  credentialForm: true,
+  forms: [{ fields: ['email', 'password'], action: 'https://www.paypal.com/signin', method: 'post', buttonText: 'Log in', labelText: 'Email password' }],
+});
+assertCase('PayPal PhishLens-style impersonation fixture scores materially above legitimate PayPal',
+  paypalDemoPattern.score >= 40 && paypalDemoPattern.score > legitimatePaypalPattern.score + 30);
 
 console.log('Modern scam-family and relationship regressions:');
 const modernScams = [
@@ -302,6 +681,9 @@ try {
   assertCase('RDAP lookup uses the registrable domain and warns cautiously',
     firstAge?.severity === 'caution' && firstAge.evidence?.hostname === 'example.co.in' && rdapUrl.endsWith('/example.co.in'));
   assertCase('RDAP results are cached across subdomains', !!secondAge && rdapCalls === 1);
+  await checkDomainAge('localhost');
+  await checkDomainAge('service.example.local');
+  assertCase('local and single-label hosts do not trigger RDAP requests', rdapCalls === 1);
 } finally {
   globalThis.fetch = originalFetch;
 }

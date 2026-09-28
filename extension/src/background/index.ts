@@ -157,12 +157,15 @@ async function analyzePage(url: string, text: string, tabId?: number, context?: 
   const screechKey = `${tabId ?? 'x'}:${url}`;
   screechFor(analysis, screechKey);
 
-  // Domain age (RDAP) is a network call — enrich in the background and re-broadcast when it lands
-  if (analysis.hostname && analysis.hostname !== 'message' && /^https?:/i.test(url)) {
+  // Domain age is supporting evidence; only query for pages that already have a concrete signal.
+  if (analysis.score >= 12 && analysis.hostname && analysis.hostname !== 'message' && /^https?:/i.test(url)) {
     checkDomainAge(analysis.hostname)
       .then((finding) => {
         if (!finding || state.currentAnalysis?.timestamp !== analysis.timestamp) return;
-        const bump = finding.severity === 'threat' ? 30 : 15;
+        const hasInfrastructureSignal = analysis.findings.some((item) =>
+          ['Suspicious TLD', 'Brand-lookalike domain', 'URL shortener', 'Raw IP address'].includes(item.title)
+        );
+        const bump = hasInfrastructureSignal ? 0 : 5;
         analysis.findings.push(finding);
         analysis.suspicionReasons.push(finding.title);
         analysis.score = Math.min(analysis.score + bump, 100);
