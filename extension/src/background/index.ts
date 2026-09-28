@@ -10,7 +10,9 @@ import type {
   ThreatReport,
   PanelStage,
 } from '../shared/types';
-import { runFullAnalysis, extractIntel, checkDomainAge, classifySeverity } from '../shared/detection';
+import { runFullAnalysis, extractIntel, checkDomainAge, classifySeverity, type AnalysisContext } from '../shared/detection';
+import { isAnalysisTextPayload, isPageAnalysisPayload } from '../shared/message-validation';
+import { analysisIdentity, TabAnalysisStore } from '../shared/tab-analysis-store';
 import { classifyScenario, pickTemplate } from '../shared/scenarios';
 import { getPersona, PERSONAS } from '../shared/personas';
 import { generatePersonaResponse } from '../shared/claude-client';
@@ -26,18 +28,71 @@ const state: HawkGuardState = {
     sound: true,
   },
 };
+const pageAnalyses = new TabAnalysisStore();
+let activePanelTabId: number | undefined;
+let requestedPanelTabId: number | undefined;
+let stateInitialized = false;
+const tabsRemovedDuringInitialization = new Set<number>();
 
 // Load persisted state on startup. MV3 kills this worker after ~30s idle, so the
 // live analysis/session are kept in storage.session to survive restarts.
 const stateReady = Promise.all([
   chrome.storage.local.get(['recentReports', 'settings']),
-  chrome.storage.session.get(['currentAnalysis', 'activeSession']),
+  chrome.storage.session.get(['currentAnalysis', 'activeSession', 'pageAnalyses', 'activePanelTabId']),
 ]).then(([data, live]) => {
   if (data.recentReports) state.recentReports = data.recentReports;
   if (data.settings) state.settings = { ...state.settings, ...data.settings };
   state.currentAnalysis = live.currentAnalysis ?? undefined;
   state.activeSession = live.activeSession ?? undefined;
+  pageAnalyses.restore(live.pageAnalyses);
+  const hadRemovedTabs = tabsRemovedDuringInitialization.size > 0;
+  for (const tabId of tabsRemovedDuringInitialization) pageAnalyses.remove(tabId);
+  const storedTabId = Number.isSafeInteger(live.activePanelTabId) && live.activePanelTabId >= 0
+    ? live.activePanelTabId as number
+    : undefined;
+  const selectedTabId = state.activeSession
+    ? storedTabId
+    : requestedPanelTabId !== undefined && !tabsRemovedDuringInitialization.has(requestedPanelTabId)
+      ? requestedPanelTabId
+      : storedTabId;
+  activePanelTabId = selectedTabId !== undefined && !tabsRemovedDuringInitialization.has(selectedTabId)
+    ? selectedTabId
+    : undefined;
+  if (activePanelTabId !== undefined) {
+    const selected = pageAnalyses.select(activePanelTabId);
+    if (!state.activeSession) state.currentAnalysis = selected;
+  } else if (!state.activeSession && storedTabId !== undefined && tabsRemovedDuringInitialization.has(storedTabId)) {
+    state.currentAnalysis = undefined;
+  }
+  stateInitialized = true;
+  tabsRemovedDuringInitialization.clear();
+  if (requestedPanelTabId !== undefined && !state.activeSession) {
+    persistPageAnalyses();
+    broadcastState();
+  } else if (hadRemovedTabs) {
+    persistPageAnalyses();
+  }
 });
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  void stateReady.then(() => {
+    activePanelTabId = tabId;
+    requestedPanelTabId = undefined;
+    const selected = pageAnalyses.select(tabId);
+    if (!state.activeSession) state.currentAnalysis = selected;
+    persistPageAnalyses();
+    broadcastState();
+  });
+});
+
+function persistPageAnalyses() {
+  chrome.storage.session.set({
+    pageAnalyses: pageAnalyses.serialize(),
+    activePanelTabId: activePanelTabId ?? null,
+  }).catch((error) => {
+    console.warn('[HawkGuard bg] could not persist tab analyses:', error instanceof Error ? error.name : 'unknown error');
+  });
+}
 
 function persist() {
   chrome.storage.local.set({
@@ -59,13 +114,24 @@ function broadcastState() {
 
 // ─── Redirect chain tracker ────────────────────────────────────
 const redirectChains = new Map<string, string[]>();
+const MAX_REDIRECT_TABS = 500;
 
 chrome.webRequest.onBeforeRedirect.addListener(
   (details) => {
     if (details.type !== 'main_frame') return;
+    let redirectHost: string;
+    try {
+      redirectHost = new URL(details.url).hostname;
+    } catch {
+      return;
+    }
     const chain = redirectChains.get(details.tabId.toString()) || [];
-    chain.push(details.url);
+    if (chain.length < 20) chain.push(redirectHost);
     redirectChains.set(details.tabId.toString(), chain);
+    if (redirectChains.size > MAX_REDIRECT_TABS) {
+      const oldestTab = redirectChains.keys().next().value;
+      if (oldestTab !== undefined) redirectChains.delete(oldestTab);
+    }
   },
   { urls: ['<all_urls>'] }
 );
@@ -78,6 +144,14 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   redirectChains.delete(tabId.toString());
   chrome.storage.session.remove(`redirects_${tabId}`);
+  if (!stateInitialized) tabsRemovedDuringInitialization.add(tabId);
+  const wasSelected = pageAnalyses.remove(tabId);
+  if (activePanelTabId === tabId) activePanelTabId = undefined;
+  if (stateInitialized) persistPageAnalyses();
+  if (wasSelected && !state.activeSession) {
+    state.currentAnalysis = undefined;
+    broadcastState();
+  }
 });
 
 chrome.webNavigation.onCommitted.addListener((details) => {
@@ -94,6 +168,15 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // Service workers can't play audio, so a hidden offscreen page does it. Each page (or pasted
 // message) screeches once, not on every rescan.
 const screeched = new Set<string>();
+function stableKey(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 async function screechFor(analysis: ScamAnalysis, key: string) {
   if (analysis.overallSeverity !== 'threat' || !state.settings.sound || screeched.has(key)) return;
   screeched.add(key);
@@ -113,8 +196,16 @@ async function screechFor(analysis: ScamAnalysis, key: string) {
 }
 
 // ─── Analysis pipeline ────────────────────────────────────────
-async function analyzePage(url: string, text: string, tabId?: number): Promise<ScamAnalysis> {
-  const analysis = runFullAnalysis(url, text);
+async function analyzePage(url: string, text: string, tabId?: number, context?: AnalysisContext): Promise<ScamAnalysis> {
+  const parsed = new URL(url);
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Unsupported page URL');
+  parsed.username = '';
+  parsed.password = '';
+  parsed.search = '';
+  parsed.hash = '';
+  const analysisUrl = parsed.toString();
+  const analysis = runFullAnalysis(analysisUrl, text, context);
+  analysis.caseId = crypto.randomUUID();
 
   // Enrich with redirect chain if available
   if (tabId !== undefined) {
@@ -134,29 +225,47 @@ async function analyzePage(url: string, text: string, tabId?: number): Promise<S
     }
   }
 
-  // While engaging a scammer, keep the case file on that scam — browsing elsewhere mustn't replace it
-  if (!state.activeSession) {
+  if (tabId !== undefined) {
+    const selected = pageAnalyses.set(tabId, analysis);
+    persistPageAnalyses();
+    // While engaging a scammer, keep the case file on that scam.
+    if (!state.activeSession) {
+      if (selected) {
+        state.currentAnalysis = analysis;
+      } else if (activePanelTabId !== undefined && pageAnalyses.selectedTab === undefined) {
+        activePanelTabId = undefined;
+        state.currentAnalysis = undefined;
+      }
+    }
+    broadcastState();
+  } else if (!state.activeSession) {
     state.currentAnalysis = analysis;
     broadcastState();
   }
-  const screechKey = `${tabId ?? 'x'}:${url}`;
+  const screechKey = `${tabId ?? 'x'}:${analysisUrl}`;
   screechFor(analysis, screechKey);
 
-  // Domain age (RDAP) is a network call — enrich in the background and re-broadcast when it lands
-  if (analysis.hostname && analysis.hostname !== 'message' && /^https?:/i.test(url)) {
+  // Domain age is supporting evidence; only query for pages that already have a concrete signal.
+  if (analysis.score >= 12 && analysis.hostname && analysis.hostname !== 'message' && /^https?:/i.test(url)) {
     checkDomainAge(analysis.hostname)
       .then((finding) => {
-        if (!finding || state.currentAnalysis?.timestamp !== analysis.timestamp) return;
-        const bump = finding.severity === 'threat' ? 30 : 15;
+        if (!finding || (tabId !== undefined
+          ? pageAnalyses.get(tabId) !== analysis
+          : state.currentAnalysis !== analysis)) return;
+        const hasInfrastructureSignal = analysis.findings.some((item) =>
+          ['Suspicious TLD', 'Brand-lookalike domain', 'URL shortener', 'Raw IP address'].includes(item.title)
+        );
+        const bump = hasInfrastructureSignal ? 0 : 5;
         analysis.findings.push(finding);
         analysis.suspicionReasons.push(finding.title);
         analysis.score = Math.min(analysis.score + bump, 100);
         analysis.overallSeverity = classifySeverity(analysis.score);
         screechFor(analysis, screechKey); // a brand-new domain can tip a page into "threat"
-        if (!state.activeSession) {
+        if (!state.activeSession && (tabId === undefined || pageAnalyses.selectedTab === tabId)) {
           state.currentAnalysis = analysis;
-          broadcastState();
         }
+        if (tabId !== undefined) persistPageAnalyses();
+        broadcastState();
       })
       .catch(() => {});
   }
@@ -171,6 +280,10 @@ async function startEngagement(
 ): Promise<EngagementSession> {
   const persona = getPersona(personaId);
   if (!persona) throw new Error('Persona not found');
+  const expectedAnalysisId = state.currentAnalysis ? analysisIdentity(state.currentAnalysis) : '';
+  if (!state.currentAnalysis || expectedAnalysisId !== analysisId) {
+    throw new Error('The selected case changed before engagement started');
+  }
 
   const session: EngagementSession = {
     id: crypto.randomUUID(),
@@ -369,19 +482,36 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
       if (msg.kind !== 'OPEN_PANEL') await stateReady;
       switch (msg.kind) {
         case 'ANALYZE_PAGE': {
+          if (!isPageAnalysisPayload(msg.payload)) {
+            sendResponse({ ok: false, error: 'Invalid page analysis payload' });
+            break;
+          }
+          if (!state.settings.autoScan) {
+            sendResponse({ ok: false, error: 'Automatic page scanning is disabled' });
+            break;
+          }
           const result = await analyzePage(
             msg.payload.url,
             msg.payload.text,
-            sender.tab?.id
+            sender.tab?.id,
+            msg.payload.context
           );
           sendResponse({ ok: true, data: result });
           break;
         }
         case 'ANALYZE_TEXT': {
+          if (!isAnalysisTextPayload(msg.payload)) {
+            sendResponse({ ok: false, error: 'Invalid or oversized text analysis payload' });
+            break;
+          }
           const result = runFullAnalysis('http://pasted.local/', msg.payload.text);
+          result.caseId = crypto.randomUUID();
+          pageAnalyses.setPasted(result);
+          activePanelTabId = undefined;
+          persistPageAnalyses();
           state.currentAnalysis = result;
           broadcastState();
-          screechFor(result, `paste:${msg.payload.text.slice(0, 300)}`);
+          screechFor(result, `paste:${stableKey(msg.payload.text.slice(0, 12000))}`);
           sendResponse({ ok: true, data: result });
           break;
         }
@@ -415,16 +545,38 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
           break;
         }
         case 'GET_STATE': {
-          sendResponse({ ok: true, data: state });
+          const tabId = msg.payload?.tabId;
+          sendResponse({
+            ok: true,
+            data: tabId === null
+              ? { ...state, currentAnalysis: undefined }
+              : tabId !== undefined && Number.isSafeInteger(tabId) && tabId >= 0
+                ? { ...state, currentAnalysis: pageAnalyses.get(tabId) }
+                : state,
+          });
           break;
         }
         case 'OPEN_PANEL': {
           // Sent from the banner buttons — must run before any other await to keep the user gesture
           const stage = msg.payload?.stage || 'evidence';
+          const tabId = sender.tab?.id ?? msg.payload?.tabId;
+          if (tabId !== undefined && Number.isSafeInteger(tabId) && tabId >= 0) {
+            requestedPanelTabId = tabId;
+            if (stateInitialized && !state.activeSession) {
+              activePanelTabId = tabId;
+              state.currentAnalysis = pageAnalyses.select(tabId);
+              persistPageAnalyses();
+              broadcastState();
+            }
+          }
           pendingPanelStage = stage; // for a panel that opens fresh
           chrome.runtime.sendMessage({ kind: 'SET_PANEL_STAGE', payload: { stage } }).catch(() => {}); // for one already open
+          const windowId = sender.tab?.windowId ?? msg.payload?.windowId;
           try {
-            await chrome.sidePanel.open({ windowId: sender.tab!.windowId });
+            if (windowId === undefined || !Number.isSafeInteger(windowId)) {
+              throw new Error('No browser window is associated with this panel request');
+            }
+            await chrome.sidePanel.open({ windowId });
           } catch (err) {
             // Chrome can reject this when the click gesture isn't forwarded — fall back to a tab
             console.warn('[HawkGuard bg] side panel refused, opening case file in a tab:', err);
@@ -449,8 +601,8 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
           sendResponse({ ok: false, error: 'Unknown message kind' });
       }
     } catch (err) {
-      console.error('[HawkGuard bg] error:', err);
-      sendResponse({ ok: false, error: String(err) });
+      console.error('[HawkGuard bg] message handling failed:', err instanceof Error ? err.name : 'unknown error');
+      sendResponse({ ok: false, error: 'Message handling failed' });
     }
   })();
   return true; // async response

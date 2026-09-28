@@ -13,6 +13,7 @@ export interface ForensicFinding {
 }
 
 export interface ScamAnalysis {
+  caseId?: string;
   url: string;
   hostname: string;
   overallSeverity: Severity;
@@ -89,11 +90,40 @@ export interface ThreatReport {
   intruders?: import('./honeypot').Intruder[]; // honeypot visitors captured during this engagement
 }
 
+export interface LinkMetadata {
+  href: string;
+  label: string;
+}
+
+export interface FormMetadata {
+  fields: string[];
+  action: string;
+  method: string;
+  buttonText: string;
+  labelText: string;
+  contextText?: string;
+  contextScope?: 'fieldset' | 'form' | 'local' | 'group' | 'section' | 'article' | 'none';
+  identityText?: string;
+  sensitiveContexts?: Array<{
+    field: string;
+    identityText: string;
+    contextScope: 'fieldset' | 'form' | 'local' | 'group';
+  }>;
+}
+
+export interface PageAnalysisContext {
+  referenceContent?: boolean;
+  credentialForm?: boolean;
+  links?: string[];
+  linkMetadata?: LinkMetadata[];
+  forms?: FormMetadata[];
+}
+
 export type PanelStage = 'evidence' | 'persona' | 'engage' | 'report';
 
 // Message types across extension surfaces
 export type ExtMessage =
-  | { kind: 'ANALYZE_PAGE'; payload: { url: string; text: string; html: string } }
+  | { kind: 'ANALYZE_PAGE'; payload: { url: string; text: string; context?: PageAnalysisContext } }
   | { kind: 'ANALYSIS_RESULT'; payload: ScamAnalysis }
   | { kind: 'ANALYZE_TEXT'; payload: { text: string } }
   | { kind: 'START_ENGAGEMENT'; payload: { analysisId: string; personaId: string; initialContext: string } }
@@ -101,8 +131,8 @@ export type ExtMessage =
   | { kind: 'DRAFT_RESPONSE'; payload: { sessionId: string } }
   | { kind: 'APPROVE_RESPONSE'; payload: { sessionId: string; messageId: string; edited?: string; draft?: EngagementMessage } }
   | { kind: 'GENERATE_REPORT'; payload: { sessionId: string } }
-  | { kind: 'GET_STATE'; payload: {} }
-  | { kind: 'OPEN_PANEL'; payload?: { stage?: PanelStage } }
+  | { kind: 'GET_STATE'; payload: { tabId?: number | null } }
+  | { kind: 'OPEN_PANEL'; payload?: { stage?: PanelStage; tabId?: number; windowId?: number } }
   | { kind: 'SET_PANEL_STAGE'; payload: { stage: PanelStage } }
   | { kind: 'CONSUME_PANEL_STAGE' }
   | { kind: 'SET_SETTINGS'; payload: Partial<HawkGuardState['settings']> }
