@@ -19,7 +19,15 @@ export function shouldRescanForMutations(
 ): boolean {
   return records.some((record) => {
     if (isOwnedNode(record.target, ownedNodes)) return false;
-    const changedNodes = [...record.addedNodes, ...record.removedNodes];
-    return changedNodes.length === 0 || changedNodes.some((node) => !isOwnedNode(node, ownedNodes));
+    let hasChangedNodes = false;
+    for (const node of record.addedNodes) {
+      hasChangedNodes = true;
+      if (!isOwnedNode(node, ownedNodes)) return true;
+    }
+    for (const node of record.removedNodes) {
+      hasChangedNodes = true;
+      if (!isOwnedNode(node, ownedNodes)) return true;
+    }
+    return !hasChangedNodes;
   });
 }

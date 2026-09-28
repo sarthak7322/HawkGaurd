@@ -3,7 +3,28 @@ import type { FormMetadata } from '../shared/types';
 const SENSITIVE_FIELD_PATTERN = /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|cc-(?:number|exp(?:-month|-year)?|csc))/i;
 const DESCRIBED_FIELD_PATTERN = /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|email|username|cc-(?:number|exp(?:-month|-year)?|csc))/i;
 
+export function boundedElements(
+  root: Node,
+  selector: string,
+  limit: number,
+  isVisible?: (element: Element) => boolean,
+): Element[] {
+  const matches: Element[] = [];
+  const walker = root.ownerDocument?.createTreeWalker(root, 1)
+    || (root as Document).createTreeWalker?.(root, 1);
+  if (!walker) return matches;
+  let element = walker.nextNode() as Element | null;
+  let visited = 0;
+  while (element && matches.length < limit && visited < 10000) {
+    visited++;
+    if (element.matches(selector) && (!isVisible || isVisible(element))) matches.push(element);
+    element = walker.nextNode() as Element | null;
+  }
+  return matches;
+}
+
 function safePageUrl(raw: string, pageUrl: string): string {
+  if (raw.length > 2048 || pageUrl.length > 2048) return '';
   try {
     const parsed = new URL(raw, pageUrl);
     if (!['http:', 'https:'].includes(parsed.protocol)) return '';
@@ -22,14 +43,12 @@ export function extractLinkMetadata(
   pageUrl: string,
   isVisible: (element: Element) => boolean,
 ): { href: string; label: string }[] {
-  return Array.from(doc.querySelectorAll('a[href]'))
-    .filter(isVisible)
-    .slice(0, 30)
+  return boundedElements(doc, 'a[href]', 30, isVisible)
     .map((element) => {
       const href = safePageUrl(element.getAttribute('href') || '', pageUrl);
       const label = extractStaticPageText(element, isVisible, 200)
-        || element.getAttribute('aria-label')
-        || element.getAttribute('title')
+        || element.getAttribute('aria-label')?.slice(0, 200)
+        || element.getAttribute('title')?.slice(0, 200)
         || '';
       return href ? { href, label } : null;
     })
@@ -40,6 +59,7 @@ export function extractStaticPageText(
   root: Element,
   isVisible: (element: Element) => boolean,
   limit = 12000,
+  maxVisitedNodes = 4000,
 ): string {
   const textUnits: string[] = [];
   let currentUnit: Element | null = null;
@@ -53,27 +73,33 @@ export function extractStaticPageText(
   let visitedNodes = 0;
   const blockSelector = 'p, li, h1, h2, h3, h4, h5, h6, blockquote, label, button, td, th, figcaption, summary, dt, dd, legend, div';
   const pending: Node[] = [root];
-  while (pending.length && capturedNodes < 600 && capturedLength < limit && visitedNodes < 4000) {
+  while (pending.length && capturedNodes < 600 && capturedLength < limit && visitedNodes < maxVisitedNodes) {
     const node = pending.pop()!;
     visitedNodes++;
     if (node.nodeType === 3) {
       const parent = node.parentElement;
-      const part = (node.textContent || '').trim();
+      const remaining = limit - capturedLength;
+      const part = (node.nodeValue || '').slice(0, remaining + 256).trim();
       if (!parent || !isVisible(parent) || !part) continue;
       const unit = parent.closest(blockSelector) || parent;
       if (currentUnit && unit !== currentUnit) flushTextUnit();
       currentUnit = unit;
       currentUnitParts.push(part);
-      const remaining = limit - capturedLength;
       currentUnitParts[currentUnitParts.length - 1] = part.slice(0, remaining);
       capturedLength += Math.min(part.length, remaining);
       capturedNodes++;
       continue;
     }
-    if (node.nodeType === 1 && !isVisible(node as Element)) continue;
-    const children = Array.from(node.childNodes);
+    if (node.nodeType === 1) {
+      const element = node as Element;
+      if (element.matches('input, textarea, select, option, [contenteditable]:not([contenteditable="false"])')
+        || !isVisible(element)) continue;
+    }
     const childLimit = Math.max(0, 4000 - visitedNodes - pending.length);
-    for (let index = Math.min(children.length, childLimit) - 1; index >= 0; index--) pending.push(children[index]);
+    for (let index = Math.min(node.childNodes.length, childLimit) - 1; index >= 0; index--) {
+      const child = node.childNodes.item(index);
+      if (child) pending.push(child);
+    }
   }
   flushTextUnit();
   return textUnits.join('\n');
@@ -84,8 +110,18 @@ export function extractFormMetadata(
   pageUrl: string,
   isVisible: (element: Element) => boolean,
 ): { forms: FormMetadata[]; credentialForm: boolean } {
+  const staticTextCache = new WeakMap<Element, Map<number, string>>();
   const staticText = (container: Element, limit = 600): string => {
-    return extractStaticPageText(container, isVisible, limit).replace(/\s+/g, ' ').trim();
+    let byLimit = staticTextCache.get(container);
+    if (!byLimit) {
+      byLimit = new Map<number, string>();
+      staticTextCache.set(container, byLimit);
+    }
+    const cached = byLimit.get(limit);
+    if (cached !== undefined) return cached;
+    const text = extractStaticPageText(container, isVisible, limit, 300).replace(/\s+/g, ' ').trim();
+    byLimit.set(limit, text);
+    return text;
   };
 
   const elementsById = new Map<string, Element[]>();
@@ -102,7 +138,7 @@ export function extractFormMetadata(
     const id = idElement.getAttribute('id');
     if (id) {
       indexedIds++;
-      if (indexedIds > 2000) {
+      if (indexedIds > 2000 || id.length > 256) {
         idIndexComplete = false;
       } else {
         const matches = elementsById.get(id) || [];
@@ -114,7 +150,7 @@ export function extractFormMetadata(
     if (idElement.tagName === 'LABEL' && idElement.hasAttribute('for')) {
       indexedLabels++;
       const labelId = idElement.getAttribute('for') || '';
-      if (indexedLabels > 200) {
+      if (indexedLabels > 200 || labelId.length > 256) {
         labelIndexComplete = false;
       } else if (labelId) {
         const labels = labelsByFor.get(labelId) || [];
@@ -135,7 +171,7 @@ export function extractFormMetadata(
     if (wrappingLabel && form.contains(wrappingLabel)) labels.push(wrappingLabel);
 
     const id = element.getAttribute('id');
-    if (!id || !idIndexComplete || !labelIndexComplete) return labels;
+    if (!id || id.length > 256 || !idIndexComplete || !labelIndexComplete) return labels;
     const idMatches = elementsById.get(id) || [];
     const explicitLabels = labelsByFor.get(id) || [];
     if (idMatches.length !== 1 || idMatches[0] !== element || explicitLabels.length !== 1) return labels;
@@ -149,13 +185,14 @@ export function extractFormMetadata(
     if (type === 'hidden') return '';
     const id = element.getAttribute('id');
     const labels = associatedLabels(element, form);
+    const metadata = (name: string) => (element.getAttribute(name) || '').slice(0, 180);
     return [
       type,
-      element.getAttribute('autocomplete') || '',
-      element.getAttribute('placeholder') || '',
-      element.getAttribute('aria-label') || '',
-      element.getAttribute('name') || '',
-      id || '',
+      metadata('autocomplete'),
+      metadata('placeholder'),
+      metadata('aria-label'),
+      metadata('name'),
+      (id || '').slice(0, 180),
       ...labels.map((label) => staticText(label, 180)),
     ].join(' ').replace(/\s+/g, ' ').trim();
   };
@@ -164,6 +201,7 @@ export function extractFormMetadata(
     field: Element,
     form: Element,
     sensitiveFields: Element[],
+    submitButtons: Element[],
   ): NonNullable<FormMetadata['sensitiveContexts']>[number] => {
     const fieldText = fieldDescriptor(field, form).slice(0, 180);
     const fieldset = field.closest('fieldset');
@@ -192,7 +230,8 @@ export function extractFormMetadata(
     const localChildren = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LABEL', 'LEGEND', 'BUTTON']);
     if (sensitiveFields.length === 1
       && formParent?.tagName === 'DIV'
-      && formParent.querySelectorAll('form').length === 1
+      && boundedElements(formParent, 'form', 2).length === 1
+      && formParent.children.length <= 20
       && Array.from(formParent.children).every((child) => child === form || localChildren.has(child.tagName))
       && !formParent.matches('section, article, [role="group"]')) {
       return {
@@ -211,12 +250,10 @@ export function extractFormMetadata(
       };
     }
 
-    const submitButtons = Array.from(form.querySelectorAll('button, input[type="submit"], [role="button"]'))
-      .filter(isVisible);
     const soleSubmitAction = sensitiveFields.length === 1 && submitButtons.length === 1
       ? (submitButtons[0].tagName === 'INPUT'
-        ? submitButtons[0].getAttribute('value') || submitButtons[0].getAttribute('aria-label') || ''
-        : staticText(submitButtons[0], 180) || submitButtons[0].getAttribute('aria-label') || '')
+        ? (submitButtons[0].getAttribute('value') || submitButtons[0].getAttribute('aria-label') || '').slice(0, 180)
+        : (staticText(submitButtons[0], 180) || submitButtons[0].getAttribute('aria-label') || '').slice(0, 180))
       : '';
     const directLabels = associatedLabels(field, form).map((label) => staticText(label, 180)).join('\n');
     return {
@@ -232,12 +269,12 @@ export function extractFormMetadata(
     identityText: string;
     sensitiveContexts: NonNullable<FormMetadata['sensitiveContexts']>;
   } => {
-    const visibleFields = Array.from(form.querySelectorAll('input, textarea, select')).slice(0, 100)
-      .filter(isVisible);
+    const visibleFields = boundedElements(form, 'input, textarea, select', 100, isVisible);
     const sensitiveFields = visibleFields
       .filter((element) => SENSITIVE_FIELD_PATTERN.test(fieldDescriptor(element, form)));
+    const submitButtons = boundedElements(form, 'button, input[type="submit"], [role="button"]', 12, isVisible);
     const sensitiveContexts = sensitiveFields.slice(0, 12)
-      .map((field) => fieldContext(field, form, sensitiveFields));
+      .map((field) => fieldContext(field, form, sensitiveFields, submitButtons));
     const firstContext = sensitiveContexts[0];
     return {
       text: firstContext?.identityText || staticText(form),
@@ -247,25 +284,21 @@ export function extractFormMetadata(
     };
   };
 
-  const forms: FormMetadata[] = Array.from(doc.querySelectorAll('form'))
-    .slice(0, 30)
+  const forms: FormMetadata[] = boundedElements(doc, 'form', 30)
     .filter(isVisible)
     .slice(0, 12)
     .map((form) => {
-      const fields = Array.from(form.querySelectorAll('input, textarea, select')).slice(0, 100)
-        .filter(isVisible)
+      const fields = boundedElements(form, 'input, textarea, select', 100, isVisible)
         .map((element) => fieldDescriptor(element, form))
         .filter((descriptor) => DESCRIBED_FIELD_PATTERN.test(descriptor))
         .map((descriptor) => descriptor.slice(0, 180))
         .slice(0, 12);
-      const buttonText = Array.from(form.querySelectorAll('button, input[type="submit"], [role="button"]')).slice(0, 12)
-        .filter(isVisible)
+      const buttonText = boundedElements(form, 'button, input[type="submit"], [role="button"]', 12, isVisible)
         .map((button) => button.tagName === 'INPUT'
-          ? button.getAttribute('value') || button.getAttribute('aria-label') || ''
-          : staticText(button, 240) || button.getAttribute('aria-label') || '')
+          ? (button.getAttribute('value') || button.getAttribute('aria-label') || '').slice(0, 240)
+          : (staticText(button, 240) || button.getAttribute('aria-label') || '').slice(0, 240))
         .join(' ').replace(/\s+/g, ' ').trim().slice(0, 240);
-      const labelText = Array.from(form.querySelectorAll('label')).slice(0, 20)
-        .filter(isVisible)
+      const labelText = boundedElements(form, 'label', 20, isVisible)
         .map((label) => staticText(label, 180))
         .join(' ').replace(/\s+/g, ' ').trim().slice(0, 400);
       const context = formContext(form);
@@ -287,8 +320,7 @@ export function extractFormMetadata(
       };
     });
 
-  const standaloneSensitiveFields = Array.from(doc.querySelectorAll('input, textarea, select'))
-    .slice(0, 100)
+  const standaloneSensitiveFields = boundedElements(doc, 'input, textarea, select', 100)
     .filter((element) => !element.closest('form') && isVisible(element))
     .map((element) => fieldDescriptor(element, doc.body || doc.documentElement))
     .filter((descriptor) => SENSITIVE_FIELD_PATTERN.test(descriptor))

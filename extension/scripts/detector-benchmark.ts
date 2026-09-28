@@ -2,6 +2,8 @@ import { checkDomainAge, getDomainParts, normalizeUnicode, runFullAnalysis, extr
 import { parseHTML } from 'linkedom';
 import { extractFormMetadata, extractLinkMetadata, extractStaticPageText } from '../src/content/form-metadata';
 import { shouldRescanForMutations } from '../src/content/mutation-filter';
+import { createBoundedDebouncedScan, createSerialScanRunner, createTrackedTimer, type TimerHost } from '../src/content/scan-scheduler';
+import { isAnalysisTextPayload, isPageAnalysisPayload } from '../src/shared/message-validation';
 
 const SCAMS = [
   'Dear customer your SBI account will be blocked today. Update KYC immediately: http://sbi-kyc.xyz',
@@ -416,12 +418,56 @@ const domMultiBrandInfo = analyzeDomFixture('https://finance.example.org/article
 assertCase('DOM fixture: multi-brand information and unrelated form stays safe',
   domMultiBrandInfo.analysis.overallSeverity === 'safe'
     && domMultiBrandInfo.analysis.findings.every((finding) => finding.title !== 'Brand-domain mismatch'));
+
+const domInformationalPage = analyzeDomFixture('https://www.example.org/about', `
+  <main><article><h1>About our service</h1><p>We provide account security guidance and customer support resources.</p></article></main>`);
+assertCase('DOM fixture: ordinary informational page remains low risk',
+  domInformationalPage.analysis.overallSeverity === 'safe' && domInformationalPage.analysis.score === 0);
+
+const domGitHubAmazonReference = analyzeDomFixture('https://github.com/example/project', `
+  <main><article><h1>Security examples</h1><p>Examples mention Amazon refunds, PayPal verification, OTPs, and fake credentials for awareness training.</p>
+  <pre><code>https://amazon-refund.example.xyz/login</code></pre></article></main>`);
+assertCase('DOM fixture: GitHub-style security documentation with scam examples stays safe',
+  domGitHubAmazonReference.analysis.overallSeverity !== 'threat'
+    && domGitHubAmazonReference.analysis.findings.every((finding) =>
+      finding.title !== 'Brand impersonation with sensitive form'));
+
+const domMultiSensitiveLogin = analyzeDomFixture('https://accounts.example.org/signin', `
+  <main><form action="/signin" method="post"><fieldset><legend>Sign in to your account</legend>
+  <label>Email <input type="email" name="email" autocomplete="username"></label>
+  <label>Password <input type="password" name="password" autocomplete="current-password"></label>
+  <button>Sign in</button></fieldset></form></main>`);
+assertCase('DOM fixture: legitimate multi-field login metadata stays low risk',
+  domMultiSensitiveLogin.forms[0]?.sensitiveContexts?.length === 1
+    && domMultiSensitiveLogin.analysis.overallSeverity !== 'threat'
+    && domMultiSensitiveLogin.analysis.findings.every((finding) => finding.title !== 'Brand impersonation with sensitive form'));
+
+const domDynamicLegitimate = parseHTML('<html><body><main><div id="mount"></div></main></body></html>');
+const dynamicLegitimateForm = domDynamicLegitimate.document.createElement('form');
+dynamicLegitimateForm.setAttribute('action', 'https://checkout.stripe.com/session');
+dynamicLegitimateForm.innerHTML = '<fieldset><legend>Secure payment</legend><label>Card number <input autocomplete="cc-number" name="card"></label><button>Pay securely</button></fieldset>';
+domDynamicLegitimate.document.querySelector('#mount')?.appendChild(dynamicLegitimateForm);
+const dynamicLegitimateMetadata = extractFormMetadata(
+  domDynamicLegitimate.document,
+  'https://shop.example.com/checkout',
+  (element) => !element.closest('[hidden], [contenteditable]:not([contenteditable="false"])'),
+);
+const dynamicLegitimateAnalysis = runFullAnalysis('https://shop.example.com/checkout', 'Secure payment', {
+  forms: dynamicLegitimateMetadata.forms,
+  credentialForm: dynamicLegitimateMetadata.credentialForm,
+});
+assertCase('dynamic DOM fixture: inserted legitimate payment form remains low risk',
+  dynamicLegitimateMetadata.forms.length === 1
+    && dynamicLegitimateAnalysis.overallSeverity !== 'threat'
+    && dynamicLegitimateAnalysis.findings.every((finding) => finding.title !== 'Sensitive form external destination'));
 const editableContentFixture = analyzeDomFixture('https://news.example.org/article', `
   <main><p>Read the article.</p>
   <a href="https://docs.example.org/guide"><span contenteditable="true">PRIVATE DRAFT CANARY</span> documentation</a>
+  <textarea name="draft">PRIVATE TEXTAREA CANARY</textarea>
   <form><label>Password <input type="password" name="password"></label></form></main>`);
-assertCase('DOM fixture: contenteditable drafts are excluded from page text and link labels',
+assertCase('DOM fixture: editable drafts and textarea contents are excluded from page text and link labels',
   !editableContentFixture.text.includes('PRIVATE DRAFT CANARY')
+    && !editableContentFixture.text.includes('PRIVATE TEXTAREA CANARY')
     && editableContentFixture.linkMetadata.every((link) => !link.label.includes('PRIVATE DRAFT CANARY')),
   `${editableContentFixture.text} | ${editableContentFixture.linkMetadata.map((link) => link.label).join(', ')}`);
 
@@ -528,6 +574,150 @@ assertCase('mutation filter: page-created matching IDs are not treated as HawkGu
   spoofedBannerIdSchedulesScan && spoofedStyleIdSchedulesScan && formUnderSpoofedIdSchedulesScan);
 assertCase('mutation filter: new page forms and mixed page/UI changes still schedule rescans',
   dynamicPageMutationSchedulesScan && mixedMutationSchedulesScan);
+
+class FakeClock implements TimerHost {
+  private now = 0;
+  private nextId = 1;
+  private readonly timers = new Map<number, { due: number; callback: () => void }>();
+
+  setTimeout(callback: () => void, delay: number): number {
+    const id = this.nextId++;
+    this.timers.set(id, { due: this.now + delay, callback });
+    return id;
+  }
+
+  clearTimeout(id: number): void {
+    this.timers.delete(id);
+  }
+
+  advance(milliseconds: number): void {
+    const target = this.now + milliseconds;
+    while (true) {
+      let nextId: number | undefined;
+      let nextDue = Infinity;
+      for (const [id, timer] of this.timers) {
+        if (timer.due < nextDue) {
+          nextId = id;
+          nextDue = timer.due;
+        }
+      }
+      if (nextId === undefined || nextDue > target) break;
+      this.now = nextDue;
+      const timer = this.timers.get(nextId);
+      this.timers.delete(nextId);
+      timer?.callback();
+    }
+    this.now = target;
+  }
+}
+
+const singleMutationClock = new FakeClock();
+let singleMutationScans = 0;
+const singleMutationScheduler = createBoundedDebouncedScan(
+  () => singleMutationScans++,
+  singleMutationClock,
+);
+singleMutationScheduler.schedule();
+singleMutationClock.advance(899);
+const singleMutationDebounced = singleMutationScans === 0;
+singleMutationClock.advance(1);
+assertCase('scan scheduler: a single mutation uses the normal 900 ms debounce',
+  singleMutationDebounced && singleMutationScans === 1);
+
+const coalescedClock = new FakeClock();
+let coalescedScans = 0;
+const coalescedScheduler = createBoundedDebouncedScan(() => coalescedScans++, coalescedClock);
+coalescedScheduler.schedule();
+coalescedClock.advance(500);
+coalescedScheduler.schedule();
+coalescedClock.advance(500);
+const mutationsCoalesced = coalescedScans === 0;
+coalescedClock.advance(400);
+assertCase('scan scheduler: mutations within the debounce interval coalesce into one scan',
+  mutationsCoalesced && coalescedScans === 1);
+
+const continuousClock = new FakeClock();
+let continuousScans = 0;
+const continuousScheduler = createBoundedDebouncedScan(() => continuousScans++, continuousClock);
+for (let elapsed = 0; elapsed < 5000; elapsed += 500) {
+  continuousScheduler.schedule();
+  continuousClock.advance(500);
+}
+const burstWasBounded = continuousScans >= 1;
+continuousScheduler.schedule();
+continuousClock.advance(900);
+assertCase('scan scheduler: continuous mutations trigger by the 5 s maximum wait and a later burst scans normally',
+  burstWasBounded && continuousScans === 2);
+
+let releaseScan: (() => void) | undefined;
+let concurrentScanCalls = 0;
+let activeScanCalls = 0;
+let maximumActiveScanCalls = 0;
+const serialRunner = createSerialScanRunner(() => {
+  concurrentScanCalls++;
+  activeScanCalls++;
+  maximumActiveScanCalls = Math.max(maximumActiveScanCalls, activeScanCalls);
+  return new Promise<void>((resolve) => {
+    releaseScan = () => {
+      activeScanCalls--;
+      resolve();
+    };
+  });
+});
+serialRunner.run();
+serialRunner.run();
+const duplicateWasSuppressed = concurrentScanCalls === 1;
+releaseScan?.();
+await Promise.resolve();
+await Promise.resolve();
+const queuedScanRanSerially = concurrentScanCalls === 2 && maximumActiveScanCalls === 1;
+releaseScan?.();
+await Promise.resolve();
+assertCase('scan scheduler: an in-flight scan serializes a coalesced follow-up without concurrency',
+  duplicateWasSuppressed && queuedScanRanSerially);
+
+const startupClock = new FakeClock();
+let startupScans = 0;
+const startupTimer = createTrackedTimer(() => startupScans++, startupClock, 400);
+startupTimer.schedule();
+startupTimer.cancel();
+startupClock.advance(400);
+const pagehideCanceledStartup = startupScans === 0;
+startupTimer.schedule();
+startupClock.advance(399);
+const pageshowWaitedForStartupDelay = startupScans === 0;
+startupClock.advance(1);
+assertCase('lifecycle: pagehide cancels startup timer and a fresh pageshow schedule runs once',
+  pagehideCanceledStartup && pageshowWaitedForStartupDelay && startupScans === 1);
+
+const repeatedBrandLinkText = 'Read PayPal login information.';
+const repeatedBrandLinks = Array.from({ length: 10 }, () => ({
+  href: 'https://paypal-login.example.xyz/account',
+  label: repeatedBrandLinkText,
+}));
+const oneBrandLinkAnalysis = runFullAnalysis('https://news.example.org/', repeatedBrandLinkText, {
+  linkMetadata: [repeatedBrandLinks[0]],
+});
+const repeatedBrandLinkAnalysis = runFullAnalysis('https://news.example.org/', repeatedBrandLinkText, {
+  linkMetadata: repeatedBrandLinks,
+});
+assertCase('duplicate branded links to the same destination do not multiply mismatch evidence',
+  repeatedBrandLinkAnalysis.score === oneBrandLinkAnalysis.score
+    && repeatedBrandLinkAnalysis.findings.filter((finding) => finding.title === 'Brand-destination mismatch').length === 1);
+
+assertCase('message validation accepts bounded page-analysis payloads',
+  isPageAnalysisPayload({
+    url: 'https://example.org/',
+    text: 'Informational content',
+    context: { forms: [], links: [], linkMetadata: [] },
+  }));
+assertCase('message validation rejects unsupported schemes and oversized page payloads',
+  !isPageAnalysisPayload({ url: 'javascript:alert(1)', text: 'x' })
+    && !isPageAnalysisPayload({ url: 'https://example.org/', text: 'x'.repeat(12001) })
+    && !isPageAnalysisPayload({ url: 'https://example.org/', text: 'x', html: '<html>raw page source</html>' }));
+assertCase('pasted text analysis is bounded before detection processing',
+  isAnalysisTextPayload({ text: 'x'.repeat(12000) })
+    && !isAnalysisTextPayload({ text: 'x'.repeat(12001) }));
 
 console.log('Branch 2 domain, form, and scoring regressions:');
 assertCase('legitimate PayPal domain with login form remains low risk',

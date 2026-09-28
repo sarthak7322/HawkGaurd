@@ -1,8 +1,9 @@
 // HawkGuard content script — silent DOM observer that pings the background.
 
 import type { ScamAnalysis, PanelStage, PageAnalysisContext } from '../shared/types';
-import { extractFormMetadata, extractLinkMetadata, extractStaticPageText } from './form-metadata';
+import { boundedElements, extractFormMetadata, extractLinkMetadata, extractStaticPageText } from './form-metadata';
 import { shouldRescanForMutations } from './mutation-filter';
+import { createBoundedDebouncedScan, createSerialScanRunner, createTrackedTimer } from './scan-scheduler';
 
 const BANNER_ID = 'hawkguard-alert-banner';
 const STYLE_ID = 'hawkguard-alert-style';
@@ -10,6 +11,13 @@ let scanVersion = 0;
 let autoScanEnabled = true;
 let pageObserver: MutationObserver | undefined;
 let lastBannerSignature = '';
+let lastPayloadFingerprint = '';
+let activeAnalysisRequest: { fingerprint: string; version: number } | undefined;
+let scannerLifecycle = 0;
+let awaitingInitialLoad = false;
+const scanRunner = createSerialScanRunner(scan);
+const scheduledScan = createBoundedDebouncedScan(() => scanRunner.run(), window);
+const startupScanTimer = createTrackedTimer(() => { void startScanner(); }, window, 400);
 const ownedUiNodes = new WeakSet<Node>();
 let bannerElement: HTMLElement | undefined;
 let styleElement: HTMLStyleElement | undefined;
@@ -29,6 +37,10 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     observeDynamicContent();
   } else {
     scanVersion++;
+    cancelScheduledScan();
+    scanRunner.cancelPending();
+    lastPayloadFingerprint = '';
+    activeAnalysisRequest = undefined;
     pageObserver?.disconnect();
     pageObserver = undefined;
     removeOwnedUi();
@@ -48,24 +60,23 @@ function extractPageData(): { text: string; context: PageAnalysisContext } {
     const style = getComputedStyle(el);
     return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse';
   };
-  const pageTitle = document.title.trim();
-  const description = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
-  const brandMetadata = Array.from(document.querySelectorAll('img[alt], [aria-label]'))
+  const pageTitle = document.title.slice(0, 300).trim();
+  const description = (document.querySelector('meta[name="description"]')?.getAttribute('content') || '').slice(0, 1000);
+  const brandMetadata = boundedElements(document, 'img[alt], [aria-label]', 50)
     .filter(isVisible)
-    .slice(0, 50)
-    .map((el) => el.getAttribute('alt') || el.getAttribute('aria-label') || '')
+    .map((el) => (el.getAttribute('alt') || el.getAttribute('aria-label') || '').slice(0, 240))
     .filter(Boolean);
-  const text = [pageTitle, description, extractStaticPageText(root, isVisible), ...brandMetadata].filter(Boolean).join('\n').slice(0, 12000);
+  const visiblePageText = extractStaticPageText(root, isVisible);
+  const text = [pageTitle, description, visiblePageText, ...brandMetadata].filter(Boolean).join('\n').slice(0, 12000);
   const { forms, credentialForm } = extractFormMetadata(document, location.href, isVisible);
   const linkMetadata = extractLinkMetadata(document, location.href, isVisible);
   const links = linkMetadata.map((link) => link.href);
 
-  const codeLength = Array.from(root.querySelectorAll('pre, code'))
-    .reduce((total, el) => total + (el.textContent?.length || 0), 0);
+  const codeLength = measureVisibleCodeText(root);
   const pathLooksDocumentary = /\/(?:docs?|documentation|wiki|blob|raw)\//i.test(location.pathname)
     || /\.md$/i.test(location.pathname)
     || /(?:documentation|source code|security advisory|research|scam awareness)/i.test(`${pageTitle} ${description}`);
-  const codeHeavy = codeLength > 800 && codeLength / Math.max(root.textContent?.length || 1, 1) > 0.15;
+  const codeHeavy = codeLength > 800 && codeLength / Math.max(visiblePageText.length, 1) > 0.15;
 
   return {
     text,
@@ -79,6 +90,36 @@ function extractPageData(): { text: string; context: PageAnalysisContext } {
   };
 }
 
+function measureVisibleCodeText(root: Element): number {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  let length = 0;
+  let visited = 0;
+  while (node && visited < 10000 && length < 12000) {
+    visited++;
+    const parent = node.parentElement;
+    if (parent?.closest('pre, code')
+      && !parent.closest('script, style, noscript, svg, nav, footer, [hidden], [aria-hidden="true"], [contenteditable]:not([contenteditable="false"])')) {
+      const style = getComputedStyle(parent);
+      if (style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse') {
+        length += Math.min(node.textContent?.length || 0, 12000 - length);
+      }
+    }
+    node = walker.nextNode();
+  }
+  return length;
+}
+
+function sanitizedPageUrl(): string {
+  const page = new URL(location.href);
+  if (!['http:', 'https:'].includes(page.protocol)) return '';
+  page.username = '';
+  page.password = '';
+  page.search = '';
+  page.hash = '';
+  return page.toString();
+}
+
 function removeOwnedUi() {
   bannerElement?.remove();
   styleElement?.remove();
@@ -88,6 +129,7 @@ function removeOwnedUi() {
 }
 
 function injectBanner(analysis: ScamAnalysis) {
+  if (!document.documentElement || !document.head || !document.body) return;
   if (analysis.overallSeverity === 'safe') {
     removeOwnedUi();
     return;
@@ -264,46 +306,70 @@ function escapeHtml(s: string): string {
 }
 
 async function scan() {
+  let request: { fingerprint: string; version: number } | undefined;
   try {
     await autoScanReady;
     if (!autoScanEnabled) {
+      lastPayloadFingerprint = '';
+      activeAnalysisRequest = undefined;
       removeOwnedUi();
       return;
     }
     const version = ++scanVersion;
     if (window.top !== window) return; // top frame only
-    if (location.protocol.startsWith('chrome')) return;
+    const url = sanitizedPageUrl();
+    if (!url) return;
     // HawkGuard's own honeypot pages (backend/src/honeypot.js) — don't scan the trap we set
-    if (document.querySelector('meta[name="hawkguard"][content="decoy"]')) return;
-    const { text, context } = extractPageData();
-    if (!text) {
+    if (document.querySelector('meta[name="hawkguard"][content="decoy"]')) {
+      lastPayloadFingerprint = '';
       removeOwnedUi();
       return;
     }
+    const { text, context } = extractPageData();
+    if (!text) {
+      lastPayloadFingerprint = '';
+      activeAnalysisRequest = undefined;
+      removeOwnedUi();
+      return;
+    }
+    const payloadFingerprint = JSON.stringify([url, text, context]);
+    if (payloadFingerprint === lastPayloadFingerprint) return;
+    if (activeAnalysisRequest?.fingerprint === payloadFingerprint) {
+      activeAnalysisRequest.version = version;
+      return;
+    }
+    request = { fingerprint: payloadFingerprint, version };
+    activeAnalysisRequest = request;
     const res = await chrome.runtime.sendMessage({
       kind: 'ANALYZE_PAGE',
-      payload: { url: location.href, text, html: '', context },
+      payload: { url, text, context },
     });
-    if (version === scanVersion && res?.ok && res.data) {
+    if (activeAnalysisRequest === request && request.version === scanVersion && res?.ok && res.data) {
+      lastPayloadFingerprint = payloadFingerprint;
       injectBanner(res.data);
     }
-  } catch (err) {
-    // Extension context may be gone during reload
+  } catch (error) {
+    console.warn('[HawkGuard] Page analysis is temporarily unavailable:', error instanceof Error ? error.name : 'unknown error');
+  } finally {
+    if (request && activeAnalysisRequest === request) activeAnalysisRequest = undefined;
   }
 }
 
-let scanTimer: number | undefined;
 function scheduleScan() {
-  window.clearTimeout(scanTimer);
-  scanTimer = window.setTimeout(scan, 900);
+  scanVersion++;
+  scheduledScan.schedule();
+}
+
+function cancelScheduledScan() {
+  scheduledScan.cancel();
 }
 
 function observeDynamicContent() {
-  if (!autoScanEnabled || !document.body || pageObserver) return;
+  if (!autoScanEnabled || !document.documentElement || pageObserver) return;
   pageObserver = new MutationObserver((records) => {
     if (shouldRescanForMutations(records, ownedUiNodes)) scheduleScan();
   });
-  pageObserver.observe(document.body, {
+  pageObserver.observe(document.documentElement, {
     subtree: true,
     childList: true,
     characterData: true,
@@ -313,14 +379,46 @@ function observeDynamicContent() {
 }
 
 async function startScanner() {
+  const lifecycle = scannerLifecycle;
   await autoScanReady;
-  await scan();
+  if (lifecycle !== scannerLifecycle) return;
   observeDynamicContent();
+  scanRunner.run();
+}
+
+window.addEventListener('popstate', scheduleScan);
+window.addEventListener('hashchange', scheduleScan);
+window.addEventListener('pagehide', () => {
+  scannerLifecycle++;
+  scanVersion++;
+  cancelScheduledScan();
+  startupScanTimer.cancel();
+  if (awaitingInitialLoad) {
+    window.removeEventListener('load', onInitialLoad);
+    awaitingInitialLoad = false;
+  }
+  scanRunner.cancelPending();
+  lastPayloadFingerprint = '';
+  activeAnalysisRequest = undefined;
+  pageObserver?.disconnect();
+  pageObserver = undefined;
+});
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) {
+    startupScanTimer.cancel();
+    void startScanner();
+  }
+});
+
+function onInitialLoad() {
+  awaitingInitialLoad = false;
+  startupScanTimer.schedule();
 }
 
 // Scan after initial render, then debounce meaningful SPA / dynamic-content changes.
 if (document.readyState === 'complete' || document.readyState === 'interactive') {
-  setTimeout(() => { void startScanner(); }, 400);
+  startupScanTimer.schedule();
 } else {
-  window.addEventListener('load', () => setTimeout(() => { void startScanner(); }, 400), { once: true });
+  awaitingInitialLoad = true;
+  window.addEventListener('load', onInitialLoad, { once: true });
 }

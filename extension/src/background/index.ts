@@ -11,6 +11,7 @@ import type {
   PanelStage,
 } from '../shared/types';
 import { runFullAnalysis, extractIntel, checkDomainAge, classifySeverity, type AnalysisContext } from '../shared/detection';
+import { isAnalysisTextPayload, isPageAnalysisPayload } from '../shared/message-validation';
 import { classifyScenario, pickTemplate } from '../shared/scenarios';
 import { getPersona, PERSONAS } from '../shared/personas';
 import { generatePersonaResponse } from '../shared/claude-client';
@@ -59,6 +60,7 @@ function broadcastState() {
 
 // ─── Redirect chain tracker ────────────────────────────────────
 const redirectChains = new Map<string, string[]>();
+const MAX_REDIRECT_TABS = 500;
 
 chrome.webRequest.onBeforeRedirect.addListener(
   (details) => {
@@ -70,8 +72,12 @@ chrome.webRequest.onBeforeRedirect.addListener(
       return;
     }
     const chain = redirectChains.get(details.tabId.toString()) || [];
-    chain.push(redirectHost);
+    if (chain.length < 20) chain.push(redirectHost);
     redirectChains.set(details.tabId.toString(), chain);
+    if (redirectChains.size > MAX_REDIRECT_TABS) {
+      const oldestTab = redirectChains.keys().next().value;
+      if (oldestTab !== undefined) redirectChains.delete(oldestTab);
+    }
   },
   { urls: ['<all_urls>'] }
 );
@@ -100,6 +106,15 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // Service workers can't play audio, so a hidden offscreen page does it. Each page (or pasted
 // message) screeches once, not on every rescan.
 const screeched = new Set<string>();
+function stableKey(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 async function screechFor(analysis: ScamAnalysis, key: string) {
   if (analysis.overallSeverity !== 'threat' || !state.settings.sound || screeched.has(key)) return;
   screeched.add(key);
@@ -120,15 +135,13 @@ async function screechFor(analysis: ScamAnalysis, key: string) {
 
 // ─── Analysis pipeline ────────────────────────────────────────
 async function analyzePage(url: string, text: string, tabId?: number, context?: AnalysisContext): Promise<ScamAnalysis> {
-  let analysisUrl = url;
-  try {
-    const parsed = new URL(url);
-    parsed.username = '';
-    parsed.password = '';
-    parsed.search = '';
-    parsed.hash = '';
-    analysisUrl = parsed.toString();
-  } catch {}
+  const parsed = new URL(url);
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Unsupported page URL');
+  parsed.username = '';
+  parsed.password = '';
+  parsed.search = '';
+  parsed.hash = '';
+  const analysisUrl = parsed.toString();
   const analysis = runFullAnalysis(analysisUrl, text, context);
 
   // Enrich with redirect chain if available
@@ -154,14 +167,14 @@ async function analyzePage(url: string, text: string, tabId?: number, context?: 
     state.currentAnalysis = analysis;
     broadcastState();
   }
-  const screechKey = `${tabId ?? 'x'}:${url}`;
+  const screechKey = `${tabId ?? 'x'}:${analysisUrl}`;
   screechFor(analysis, screechKey);
 
   // Domain age is supporting evidence; only query for pages that already have a concrete signal.
   if (analysis.score >= 12 && analysis.hostname && analysis.hostname !== 'message' && /^https?:/i.test(url)) {
     checkDomainAge(analysis.hostname)
       .then((finding) => {
-        if (!finding || state.currentAnalysis?.timestamp !== analysis.timestamp) return;
+        if (!finding || state.currentAnalysis !== analysis) return;
         const hasInfrastructureSignal = analysis.findings.some((item) =>
           ['Suspicious TLD', 'Brand-lookalike domain', 'URL shortener', 'Raw IP address'].includes(item.title)
         );
@@ -386,6 +399,10 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
       if (msg.kind !== 'OPEN_PANEL') await stateReady;
       switch (msg.kind) {
         case 'ANALYZE_PAGE': {
+          if (!isPageAnalysisPayload(msg.payload)) {
+            sendResponse({ ok: false, error: 'Invalid page analysis payload' });
+            break;
+          }
           if (!state.settings.autoScan) {
             sendResponse({ ok: false, error: 'Automatic page scanning is disabled' });
             break;
@@ -400,10 +417,14 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
           break;
         }
         case 'ANALYZE_TEXT': {
+          if (!isAnalysisTextPayload(msg.payload)) {
+            sendResponse({ ok: false, error: 'Invalid or oversized text analysis payload' });
+            break;
+          }
           const result = runFullAnalysis('http://pasted.local/', msg.payload.text);
           state.currentAnalysis = result;
           broadcastState();
-          screechFor(result, `paste:${msg.payload.text.slice(0, 300)}`);
+          screechFor(result, `paste:${stableKey(msg.payload.text.slice(0, 12000))}`);
           sendResponse({ ok: true, data: result });
           break;
         }
@@ -471,8 +492,8 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
           sendResponse({ ok: false, error: 'Unknown message kind' });
       }
     } catch (err) {
-      console.error('[HawkGuard bg] error:', err);
-      sendResponse({ ok: false, error: String(err) });
+      console.error('[HawkGuard bg] message handling failed:', err instanceof Error ? err.name : 'unknown error');
+      sendResponse({ ok: false, error: 'Message handling failed' });
     }
   })();
   return true; // async response

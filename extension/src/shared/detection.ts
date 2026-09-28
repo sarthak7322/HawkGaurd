@@ -822,6 +822,7 @@ function analyzeLinks(text: string, linkUrls: string[] = [], pageHostname = '', 
     ...linkUrls,
   ].map(cleanUrl)));
   const seen = new Set<string>();
+  const seenBrandDestinations = new Set<string>();
   let score = 0;
   const findings: ForensicFinding[] = [];
   const reasons: string[] = [];
@@ -855,6 +856,9 @@ function analyzeLinks(text: string, linkUrls: string[] = [], pageHostname = '', 
     const riskyDestination = brandHostnameEvidence(href, rule).length > 0
       || destination.findings.some((finding) => ['Suspicious TLD', 'URL shortener', 'Raw IP address'].includes(finding.title));
     if (!identityText || !riskyDestination) continue;
+    const brandDestinationKey = `${rule.name}:${canonicalHostname(href)}`;
+    if (seenBrandDestinations.has(brandDestinationKey)) continue;
+    seenBrandDestinations.add(brandDestinationKey);
     score += 16;
     reasons.push(`${rule.name} link points to a suspicious destination`);
     findings.push({
@@ -1030,6 +1034,7 @@ export function runFullAnalysis(url: string, text: string, context: AnalysisCont
 // repeating lookups while a dynamic page is being rescanned.
 const ageCache = new Map<string, { expiresAt: number; finding: ForensicFinding | null }>();
 const ageRequests = new Map<string, Promise<ForensicFinding | null>>();
+const MAX_CONCURRENT_AGE_REQUESTS = 20;
 
 function registrableDomain(hostname: string): string {
   return toAsciiHostname(getDomainParts(hostname).registrableDomain);
@@ -1047,6 +1052,7 @@ export async function checkDomainAge(hostname: string): Promise<ForensicFinding 
   if (cached && cached.expiresAt > Date.now()) return cached.finding;
   const pending = ageRequests.get(domain);
   if (pending) return pending;
+  if (ageRequests.size >= MAX_CONCURRENT_AGE_REQUESTS) return null;
 
   const request = lookupDomainAge(domain);
   ageRequests.set(domain, request);
