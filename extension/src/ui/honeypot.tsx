@@ -79,10 +79,13 @@ export function IntruderCard({ v, selected, onSelect }: { v: Intruder; selected?
           {v.geo.isp ? ` · ${v.geo.isp}` : ''}
         </span>
         {v.geo.lat !== undefined && v.geo.lon !== undefined && (
-          <a className="map-link" href={mapUrl(v.geo.lat, v.geo.lon)} target="_blank" rel="noreferrer" title="Approximate — IP geolocation is city-level">
-            <MapPin size={11} /> ≈ {v.geo.lat.toFixed(3)}, {v.geo.lon.toFixed(3)}
+          <a className="map-link" href={mapUrl(v.geo.lat, v.geo.lon)} target="_blank" rel="noreferrer" title={v.geo.precise ? 'Precise — consented GPS' : 'Approximate — IP geolocation is city-level'}>
+            <MapPin size={11} /> {v.geo.precise ? '' : '≈ '}
+            {v.geo.lat.toFixed(v.geo.precise ? 5 : 3)}, {v.geo.lon.toFixed(v.geo.precise ? 5 : 3)}
+            {v.geo.precise && v.geo.accuracyM ? ` ±${v.geo.accuracyM} m` : ''}
           </a>
         )}
+        {v.geo.precise && <span className="flag flag--threat">GPS fix</span>}
         {v.geo.mobile && <span>mobile network</span>}
         {v.geo.asn && <span className="mono">{v.geo.asn.split(' ')[0]}</span>}
         {v.geo.vpn && <span className="flag flag--caution">VPN / hosting IP</span>}

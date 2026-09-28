@@ -14,12 +14,12 @@ export interface DecoyInfo {
 export interface HoneypotEvent {
   id: string;
   at: number;
-  type: 'visit' | 'probe' | 'login_failed' | 'login_success' | 'page_view' | 'exfil_attempt';
+  type: 'visit' | 'probe' | 'login_failed' | 'login_success' | 'page_view' | 'exfil_attempt' | 'precise_location';
   severity: 'info' | 'medium' | 'high' | 'critical';
   visitor: string;
   ip: string;
   // Approximate, IP-based (city level — the ISP's network, not the device's exact position)
-  geo: { label: string; lat?: number; lon?: number; timezone?: string; isp?: string; asn?: string; mobile?: boolean; vpn?: boolean; sameNetwork?: boolean };
+  geo: { label: string; lat?: number; lon?: number; timezone?: string; isp?: string; asn?: string; mobile?: boolean; vpn?: boolean; sameNetwork?: boolean; precise?: boolean; accuracyM?: number };
   device: string;
   browser: string;
   automated: boolean;
@@ -95,6 +95,9 @@ export function groupIntruders(events: HoneypotEvent[]): Intruder[] {
       byVisitor.set(e.visitor, v);
     }
     v.lastSeen = e.at;
+    // A consented GPS fix wins over IP geo (keeping its city/ISP details); otherwise adopt the first located fix
+    if (e.geo?.precise) v.geo = { ...v.geo, ...e.geo };
+    else if (!v.geo.precise && v.geo.lat === undefined && e.geo?.lat !== undefined) v.geo = e.geo;
     v.actions.push(e);
     if (e.type === 'login_success') v.loggedIn = true;
     if (e.username !== undefined) v.credentialsTried.push({ username: e.username, password: e.password || '' });
