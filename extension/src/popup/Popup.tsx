@@ -7,27 +7,54 @@ type Tab = 'current' | 'paste' | 'reports';
 
 export function Popup() {
   const [state, setState] = useState<HawkGuardState | null>(null);
+  const [currentTabId, setCurrentTabId] = useState<number | undefined>();
   const [tab, setTab] = useState<Tab>('current');
   const [pasteText, setPasteText] = useState('');
   const [pasteResult, setPasteResult] = useState<ScamAnalysis | null>(null);
   const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
-    chrome.runtime.sendMessage({ kind: 'GET_STATE' }).then((res) => {
-      if (res?.ok) setState(res.data);
-    });
+    let mounted = true;
+    let requestVersion = 0;
+    const refresh = async () => {
+      const version = ++requestVersion;
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!mounted || version !== requestVersion) return;
+      setCurrentTabId(activeTab?.id);
+      const res = await chrome.runtime.sendMessage({
+        kind: 'GET_STATE',
+        payload: { tabId: activeTab?.id ?? null },
+      });
+      if (mounted && version === requestVersion && res?.ok) setState(res.data);
+    };
+    void refresh();
     const listener = (msg: any) => {
-      if (msg.kind === 'STATE_UPDATE') setState(msg.payload);
+      if (msg.kind === 'STATE_UPDATE') void refresh();
     };
     chrome.runtime.onMessage.addListener(listener);
-    return () => chrome.runtime.onMessage.removeListener(listener);
+    return () => {
+      mounted = false;
+      chrome.runtime.onMessage.removeListener(listener);
+    };
   }, []);
 
-  const openPanel = async () => {
+  const openPanel = async (tabId?: number) => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tabId !== undefined && tab.windowId !== undefined) {
+      await chrome.runtime.sendMessage({
+        kind: 'OPEN_PANEL',
+        payload: { stage: 'evidence', tabId, windowId: tab.windowId },
+      });
+      return;
+    }
     if (tab.windowId !== undefined) {
       await chrome.sidePanel.open({ windowId: tab.windowId });
     }
+  };
+
+  const openCurrentPagePanel = async () => {
+    if (currentTabId === undefined) return;
+    await openPanel(currentTabId);
   };
 
   const analyzePaste = async () => {
@@ -95,7 +122,12 @@ export function Popup() {
       </nav>
 
       <main className="popup-body">
-        {tab === 'current' && <CurrentPageTab analysis={state?.currentAnalysis} onOpen={openPanel} />}
+        {tab === 'current' && (
+          <CurrentPageTab
+            analysis={state?.currentAnalysis}
+            onOpen={openCurrentPagePanel}
+          />
+        )}
         {tab === 'paste' && (
           <PasteTab
             text={pasteText}

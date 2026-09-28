@@ -13,6 +13,7 @@ export interface ForensicFinding {
 }
 
 export interface ScamAnalysis {
+  caseId?: string;
   url: string;
   hostname: string;
   overallSeverity: Severity;
@@ -128,8 +129,8 @@ export type ExtMessage =
   | { kind: 'DRAFT_RESPONSE'; payload: { sessionId: string } }
   | { kind: 'APPROVE_RESPONSE'; payload: { sessionId: string; messageId: string; edited?: string; draft?: EngagementMessage } }
   | { kind: 'GENERATE_REPORT'; payload: { sessionId: string } }
-  | { kind: 'GET_STATE'; payload: {} }
-  | { kind: 'OPEN_PANEL'; payload?: { stage?: PanelStage } }
+  | { kind: 'GET_STATE'; payload: { tabId?: number | null } }
+  | { kind: 'OPEN_PANEL'; payload?: { stage?: PanelStage; tabId?: number; windowId?: number } }
   | { kind: 'SET_PANEL_STAGE'; payload: { stage: PanelStage } }
   | { kind: 'CONSUME_PANEL_STAGE' }
   | { kind: 'SET_SETTINGS'; payload: Partial<HawkGuardState['settings']> }

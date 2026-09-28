@@ -277,11 +277,67 @@ const REFERENCE_CUES = [
   /\b(?:this|the)\s+(?:article|guide|document|report|repository|project)\s+(?:explains?|describes?|documents?|demonstrates?|contains?)\b/i,
 ];
 const REFERENCE_TERMS = /\b(?:article|guide|documentation|docs|research|tutorial|awareness|training|educational|examples?|sample|repository|source code|security report|warning|advisory)\b/gi;
+const EXAMPLE_BLOCK_CUES = [
+  /\b(?:example|sample)\s+(?:scam\s+)?messages?\s+(?:include|such as|like)\s*:?\s*/i,
+  /\b(?:scam|phishing|fraud)\s+examples?\s+(?:include|such as)\s*:?\s*/i,
+  /\b(?:scam|phishing|fraud)\s+examples?\s*:\s*/i,
+  /\b(?:examples?|sample messages?|test cases?)\s*:\s*/i,
+  /\bfor demonstration(?: purposes)?\s*[:,]\s*/i,
+  /^\s*(?:(?:sample|example)(?:\s+scam)?\s+messages?|test\s+messages?|(?:sample|example)\s+cases?)\s*:?\s*$/i,
+];
+const MAX_EXAMPLE_BLOCK_LINES = 6;
+const MAX_EXAMPLE_BLOCK_CHARS = 1200;
 
 export function isReferenceContent(text: string): boolean {
   if (REFERENCE_CUES.some((pattern) => pattern.test(text))) return true;
   const terms = text.match(REFERENCE_TERMS)?.length ?? 0;
   return terms >= 3 && /\b(?:scam|fraud|phishing|security|credential|otp)\b/i.test(text);
+}
+
+function maskIntroducedExamples(text: string): string {
+  const lines = text.split('\n');
+  let index = 0;
+  while (index < lines.length) {
+    const cue = EXAMPLE_BLOCK_CUES.map((pattern) => pattern.exec(lines[index]))
+      .find((match) => match !== null);
+    if (!cue) {
+      index++;
+      continue;
+    }
+
+    let remainingChars = MAX_EXAMPLE_BLOCK_CHARS;
+    let processedLines = 0;
+    let examplesStarted = false;
+    let blankLinesBeforeExamples = 0;
+    for (let lineIndex = index;
+      lineIndex < lines.length
+        && lineIndex - index < MAX_EXAMPLE_BLOCK_LINES
+        && processedLines < MAX_EXAMPLE_BLOCK_LINES;
+      lineIndex++) {
+      const line = lines[lineIndex];
+      const start = lineIndex === index ? cue.index + cue[0].length : 0;
+      const content = line.slice(start);
+      if (!content.trim()) {
+        if (lineIndex === index) continue;
+        if (!examplesStarted && blankLinesBeforeExamples === 0) {
+          blankLinesBeforeExamples++;
+          continue;
+        }
+        break;
+      }
+      if (remainingChars <= 0) break;
+
+      examplesStarted = true;
+      processedLines++;
+      const maskedLength = Math.min(content.length, remainingChars);
+      lines[lineIndex] = line.slice(0, start) + ' '.repeat(maskedLength) + content.slice(maskedLength);
+      remainingChars -= maskedLength;
+
+      if (maskedLength < content.length) break;
+    }
+    index += Math.max(processedLines, 1);
+  }
+  return lines.join('\n');
 }
 
 // Negative signals — legitimate messages that share keywords with scams.
@@ -338,8 +394,10 @@ export function analyzeContent(text: string, context: AnalysisContext = {}): { s
   const reasons: string[] = [];
   const normalizedOriginal = normalizeUnicode(text);
   const normalized = detectionText(normalizedOriginal);
-  const deob = normalized;
   const referenceContent = context.referenceContent ?? isReferenceContent(normalized);
+  const signalText = maskIntroducedExamples(normalized);
+  const signalOriginal = maskIntroducedExamples(normalizedOriginal);
+  const deob = signalText;
   let score = 0;
   const finding = (category: ForensicFinding['category'], title: string, severity: Severity, detail: string, evidence: Record<string, string | number>) =>
     findings.push({ id: crypto.randomUUID(), category, title, severity, detail, evidence, timestamp: Date.now() });
@@ -347,7 +405,7 @@ export function analyzeContent(text: string, context: AnalysisContext = {}): { s
   // Negative signals first (legitimate-message markers)
   let credit = 0;
   const neg = new Set<string>();
-  for (const n of NEGATIVE) if (n.re.test(normalized)) { credit += n.weight; neg.add(n.key); }
+  for (const n of NEGATIVE) if (n.re.test(signalText)) { credit += n.weight; neg.add(n.key); }
   const otpDelivery = neg.has('otp_delivery') || neg.has('otp_delivery2');
 
   // Positive categories
@@ -359,7 +417,7 @@ export function analyzeContent(text: string, context: AnalysisContext = {}): { s
       && /(?:enter|submit|type|input|provide|update)[^.?!\n]{0,35}(?:otp|one[\s-]?time|cvv|pin|password|passcode|kyc|aadhaar|card\s*(?:number|details)|account\s*(?:number|details))/i.test(deob);
     const credentialTransfer = /(?:share|send|give|tell|read\s*out|reply\s*with)[^.?!\n]{0,45}(?:otp|one[\s-]?time|cvv|pin|password|passcode|kyc|aadhaar|card\s*(?:number|details)|account\s*(?:number|details))/i.test(deob);
     if (routineCredentialEntry && !credentialTransfer) continue;
-    const { hit } = anyHit(c.res, normalized, deob);
+    const { hit } = anyHit(c.res, signalText, deob);
     if (hit) {
       score += c.weight;
       reasons.push(c.title);
@@ -368,7 +426,7 @@ export function analyzeContent(text: string, context: AnalysisContext = {}): { s
   }
 
   // Urgency (supporting signal)
-  const urgencyCount = countHits(URGENCY, normalized);
+  const urgencyCount = countHits(URGENCY, signalText);
   if (urgencyCount > 0) {
     score += Math.min(urgencyCount * 2, 6);
     reasons.push(`Urgency / time pressure (${urgencyCount})`);
@@ -379,7 +437,7 @@ export function analyzeContent(text: string, context: AnalysisContext = {}): { s
   // suspicious than either signal alone.
   const hasCredential = findings.some((f) => f.title === 'Credential solicitation');
   const hasAccountThreat = findings.some((f) => f.title === 'Account block/expiry threat')
-    || (hasCredential && /(?:account|a\/c|card|kyc|wallet|sim)[^.?!\n]{0,55}(?:blocked|suspend|frozen|deactivat|expired|on\s+hold|closed)/i.test(normalized));
+    || (hasCredential && /(?:account|a\/c|card|kyc|wallet|sim)[^.?!\n]{0,55}(?:blocked|suspend|frozen|deactivat|expired|on\s+hold|closed)/i.test(signalText));
 
   if (hasCredential && hasAccountThreat) {
     score += 20;
@@ -394,7 +452,7 @@ export function analyzeContent(text: string, context: AnalysisContext = {}): { s
   }
   // Authority impersonation — only counts alongside a threat/pressure signal, so a neutral
   // "Income Tax Dept: your ITR was processed" doesn't get flagged.
-  const authority = anyHit(AUTHORITY, normalized, deob);
+  const authority = anyHit(AUTHORITY, signalText, deob);
   if (authority.hit && (score > 0 || urgencyCount > 0)) {
     score += 18;
     reasons.push('Authority impersonation');
@@ -403,7 +461,7 @@ export function analyzeContent(text: string, context: AnalysisContext = {}): { s
   }
 
   // Brand impersonation — only alongside credential/payment/link activity
-  const brand = anyHit(BRANDS, normalized, deob);
+  const brand = anyHit(BRANDS, signalText, deob);
   const activity = findings.some((f) => ['Credential solicitation', 'Payment demand', 'Click-the-link bait', 'Fake refund / cashback bait', 'Recovery-code theft', 'Suspicious authorization request', 'Shared-document credential bait'].includes(f.title));
   if (brand.hit && activity) {
     score += 10;
@@ -411,7 +469,7 @@ export function analyzeContent(text: string, context: AnalysisContext = {}): { s
     finding('content', 'Brand impersonation', 'threat', 'References a well-known brand next to a credential, payment or link request.', { brand: brand.example });
   }
 
-  const directSensitiveAsk = normalized.split(/[.?!\n]+/).some((sentence) => {
+  const directSensitiveAsk = signalText.split(/[.?!\n]+/).some((sentence) => {
     const requestPattern = /(?:share|send|give|tell|provide|enter|submit|read\s*out|reply\s*with|बताएं|भेजें|डालें|साझा|दर्ज)[^.?!\n]{0,45}(?:otp|one[\s-]?time|pin|cvv|password|kyc|aadhaar|खाता|ओटीपी)/gi;
     let match: RegExpExecArray | null;
     while ((match = requestPattern.exec(sentence))) {
@@ -420,15 +478,16 @@ export function analyzeContent(text: string, context: AnalysisContext = {}): { s
     }
     return false;
   });
-  const separateExplicitRequest = /\bbut\b[^.?!\n]{0,20}(?:send|give|tell|provide|submit|read\s*out|reply\s*with|share)[^.?!\n]{0,45}(?:otp|one[\s-]?time|pin|cvv|password|kyc|aadhaar|account)/i.test(normalized);
-  const unambiguousSensitiveTransfer = /\b(?:send|give|provide|tell|read\s*out|reply\s*with)\b[^.?!\n]{0,45}(?:otp|one[\s-]?time|pin|cvv|password|kyc|aadhaar|account|recovery\s*code|backup\s*code)/i.test(normalized);
+  const separateExplicitRequest = /\bbut\b[^.?!\n]{0,20}(?:send|give|tell|provide|submit|read\s*out|reply\s*with|share)[^.?!\n]{0,45}(?:otp|one[\s-]?time|pin|cvv|password|kyc|aadhaar|account)/i.test(signalText);
+  const unambiguousSensitiveTransfer = /\b(?:send|give|provide|tell|read\s*out|reply\s*with)\b[^.?!\n]{0,45}(?:otp|one[\s-]?time|pin|cvv|password|kyc|aadhaar|account|recovery\s*code|backup\s*code)/i.test(signalText);
   const hasActiveSensitiveAsk = directSensitiveAsk || separateExplicitRequest || unambiguousSensitiveTransfer;
-  const hasUnquotedSensitiveRequest = normalized.split(/[.?!\n]+/).some((sentence) => {
-    const explanatoryContext = /\b(?:example|sample|quote|scammers?|attackers?|criminals?|fraudsters?)\b/i.test(sentence);
-    return !explanatoryContext && /(?:share|send|give|tell|provide|enter|submit|read\s*out|reply\s*with)\b[^.?!\n]{0,45}(?:otp|one[\s-]?time|pin|cvv|password|kyc|aadhaar|account|recovery\s*code|backup\s*code)/i.test(sentence);
+  const hasUnquotedSensitiveRequest = signalText.split(/[.?!\n]+/).some((sentence) => {
+    const quotedScamContext = /\b(?:quote|scammers?|attackers?|criminals?|fraudsters?)\b/i.test(sentence);
+    return !quotedScamContext
+      && /(?:share|send|give|tell|provide|enter|submit|read\s*out|reply\s*with)\b[^.?!\n]{0,45}(?:otp|one[\s-]?time|pin|cvv|password|kyc|aadhaar|account|recovery\s*code|backup\s*code)/i.test(sentence);
   });
-  const explicitWarning = /\b(?:never|do\s+not|don't|dont)\s+(?:share|disclose|reveal|give|send)\b[^.?!\n]{0,45}\b(?:otp|pin|cvv|password|code|card|kyc|bank|details)\b/i.test(normalized)
-    || /\b(?:warns?|warning|advisory|beware|awareness|protect yourself)\b[^.?!\n]{0,90}\b(?:fraud|scam|phishing|otp|pin|kyc)\b/i.test(normalized);
+  const explicitWarning = /\b(?:never|do\s+not|don't|dont)\s+(?:share|disclose|reveal|give|send)\b[^.?!\n]{0,45}\b(?:otp|pin|cvv|password|code|card|kyc|bank|details)\b/i.test(signalText)
+    || /\b(?:warns?|warning|advisory|beware|awareness|protect yourself)\b[^.?!\n]{0,90}\b(?:fraud|scam|phishing|otp|pin|kyc)\b/i.test(signalText);
   if (explicitWarning && !hasActiveSensitiveAsk) {
     score = 0;
     findings.length = 0;
@@ -451,14 +510,14 @@ export function analyzeContent(text: string, context: AnalysisContext = {}): { s
 
   // Hindi/Hinglish solicitations combine the sensitive term with a request verb rather
   // than English word order; the ordinary category patterns don't cover those inflections.
-  if (!referenceContent && (!explicitWarning || hasActiveSensitiveAsk) && HAS_DEVANAGARI.test(normalized) && SENSITIVE_TERM.test(deob) && /(?:बताएं|बताओ|भेजें|भेजो|डालें|डालो|साझा|दर्ज|अपडेट\s*करें|करें)/.test(normalized) && !findings.some((f) => f.title === 'Credential solicitation')) {
+  if (!referenceContent && (!explicitWarning || hasActiveSensitiveAsk) && HAS_DEVANAGARI.test(signalText) && SENSITIVE_TERM.test(deob) && /(?:बताएं|बताओ|भेजें|भेजो|डालें|डालो|साझा|दर्ज|अपडेट\s*करें|करें)/.test(signalText) && !findings.some((f) => f.title === 'Credential solicitation')) {
     score += 40;
     reasons.push('Credential solicitation');
     finding('content', 'Credential solicitation', 'threat',
       'Requests a sensitive code or account detail in Hindi/Hinglish.', { signal: 'localized-credential-request' });
   }
-  const detectionLines = normalized.split('\n');
-  const originalLines = normalizedOriginal.split('\n');
+  const detectionLines = signalText.split('\n');
+  const originalLines = signalOriginal.split('\n');
   const mixedScriptInSuspiciousUnit = detectionLines.some((line, index) =>
     hasMixedScriptToken(originalLines[index] ?? '')
       && CATEGORIES.some((category) =>

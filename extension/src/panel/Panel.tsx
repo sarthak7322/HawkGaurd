@@ -23,6 +23,7 @@ import type {
   PanelStage,
 } from '../shared/types';
 import { PERSONAS, getPersona } from '../shared/personas';
+import { analysisIdentity } from '../shared/tab-analysis-store';
 import { fetchHealth, type Health } from '../ui/ai';
 import { HoneypotCard, useHoneypot } from '../ui/honeypot';
 import {
@@ -76,7 +77,7 @@ export function Panel() {
   };
 
   useEffect(() => {
-    chrome.runtime.sendMessage({ kind: 'GET_STATE' }).then((res) => {
+    chrome.runtime.sendMessage({ kind: 'GET_STATE', payload: {} }).then((res) => {
       if (res?.ok) setState(res.data);
     });
     // Banner buttons can ask for a starting stage (Engage → persona)
@@ -108,7 +109,7 @@ export function Panel() {
     const res = await chrome.runtime.sendMessage({
       kind: 'START_ENGAGEMENT',
       payload: {
-        analysisId: analysis.timestamp.toString(),
+        analysisId: analysisIdentity(analysis),
         personaId: selectedPersona,
         initialContext: context,
       },

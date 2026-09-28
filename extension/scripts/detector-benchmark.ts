@@ -4,6 +4,7 @@ import { extractFormMetadata, extractLinkMetadata, extractStaticPageText } from 
 import { shouldRescanForMutations } from '../src/content/mutation-filter';
 import { createBoundedDebouncedScan, createSerialScanRunner, createTrackedTimer, type TimerHost } from '../src/content/scan-scheduler';
 import { isAnalysisTextPayload, isPageAnalysisPayload } from '../src/shared/message-validation';
+import { analysisIdentity, TabAnalysisStore } from '../src/shared/tab-analysis-store';
 
 const SCAMS = [
   'Dear customer your SBI account will be blocked today. Update KYC immediately: http://sbi-kyc.xyz',
@@ -109,6 +110,83 @@ assertCase('reference wording does not suppress a direct OTP theft threat',
   runFullAnalysis('https://security.example.org/guide', 'Security research: send your OTP or your account will be blocked.').overallSeverity === 'threat');
 assertCase('explanatory security research remains safe',
   runFullAnalysis('https://security.example.org/guide', 'Security research explains why attackers ask victims for OTPs.').overallSeverity === 'safe');
+const otpExampleBlock = runFullAnalysis(
+  'https://github.com/example/research',
+  'Security research repository. Example messages include:\nSend me your OTP or your account will be blocked.',
+);
+const refundExampleBlock = runFullAnalysis(
+  'https://github.com/example/research',
+  'Security research repository. Example messages include:\nPay a processing fee to claim your refund.',
+);
+const anydeskExampleBlock = runFullAnalysis(
+  'https://github.com/example/research',
+  'Security research repository. Example messages include:\nInstall AnyDesk so our bank executive can help you fix your net banking issue.',
+);
+assertCase('separated reference cue suppresses illustrative OTP/account-block examples',
+  otpExampleBlock.score === 0 && otpExampleBlock.overallSeverity === 'safe');
+assertCase('separated reference cue suppresses illustrative refund-fee examples',
+  refundExampleBlock.score === 0 && refundExampleBlock.overallSeverity === 'safe');
+assertCase('separated reference cue suppresses illustrative AnyDesk examples',
+  anydeskExampleBlock.score === 0 && anydeskExampleBlock.overallSeverity === 'safe');
+const multipleReferenceExamples = runFullAnalysis(
+  'https://github.com/example/research',
+  'Security research repository. Sample messages:\nSend me your OTP or your account will be blocked.\nPay a processing fee to claim your refund.\nInstall AnyDesk so our bank executive can help you.',
+);
+assertCase('multiple newline-separated examples under one reference heading remain safe',
+  multipleReferenceExamples.score === 0 && multipleReferenceExamples.overallSeverity === 'safe');
+const sentenceSeparatedExamples = runFullAnalysis(
+  'https://github.com/example/research',
+  'Security research repository. Examples: Send me your OTP or your account will be blocked. Pay a processing fee to claim your refund. Install AnyDesk so our bank executive can help you.',
+);
+assertCase('sentence-separated examples after an explicit examples cue remain safe',
+  sentenceSeparatedExamples.score === 0 && sentenceSeparatedExamples.overallSeverity === 'safe');
+const standaloneExampleCue = runFullAnalysis(
+  'https://ordinary.example.net/page',
+  'Examples: Send me your OTP or your account will be blocked.',
+);
+assertCase('an explicit examples block is contextualized without broad page-wide reference suppression',
+  standaloneExampleCue.score === 0 && standaloneExampleCue.overallSeverity === 'safe');
+const sampleMessagesHeading = runFullAnalysis(
+  'https://github.com/example/research',
+  'Security research repository.\nSample messages\nSend me your OTP or your account will be blocked.',
+);
+assertCase('punctuation-free Sample messages heading suppresses its OTP/account-block example',
+  sampleMessagesHeading.score === 0 && sampleMessagesHeading.overallSeverity === 'safe');
+const exampleMessagesHeading = runFullAnalysis(
+  'https://github.com/example/research',
+  'Security research repository.\nExample messages\nPay a processing fee to claim your refund.',
+);
+assertCase('punctuation-free Example messages heading suppresses its refund-fee example',
+  exampleMessagesHeading.score === 0 && exampleMessagesHeading.overallSeverity === 'safe');
+const sampleCasesHeading = runFullAnalysis(
+  'https://github.com/example/research',
+  'Security research repository.\nSample cases\nInstall AnyDesk so our bank executive can help you.',
+);
+assertCase('punctuation-free Sample cases heading suppresses its remote-access example',
+  sampleCasesHeading.score === 0 && sampleCasesHeading.overallSeverity === 'safe');
+const referenceBlockThenDirectRequest = runFullAnalysis(
+  'https://github.com/example/research',
+  'Security research repository. Example messages include:\nSend me your OTP or your account will be blocked.\nPay a processing fee to claim your refund.\n\nSend me your OTP now or your account will be blocked.',
+);
+assertCase('a genuine direct scam request after the reference block remains detectable',
+  referenceBlockThenDirectRequest.overallSeverity === 'threat'
+    && referenceBlockThenDirectRequest.findings.some((finding) => finding.title === 'Credential solicitation'));
+const exampleWordDirectRequest = runFullAnalysis(
+  'https://security.example.org/guide',
+  'Security research discusses this example. This is a live request: send me your OTP or your account will be blocked.',
+  { referenceContent: true },
+);
+assertCase('a direct request containing the word example is not suppressed',
+  exampleWordDirectRequest.overallSeverity === 'threat'
+    && exampleWordDirectRequest.findings.some((finding) => finding.title === 'Credential solicitation'));
+const sampleWordDirectRequest = runFullAnalysis(
+  'https://security.example.org/guide',
+  'This sample request is live: send me your OTP or your account will be blocked.',
+  { referenceContent: true },
+);
+assertCase('a direct request containing sample wording is not suppressed',
+  sampleWordDirectRequest.overallSeverity === 'threat'
+    && sampleWordDirectRequest.findings.some((finding) => finding.title === 'Credential solicitation'));
 const referenceThreat = runFullAnalysis(
   'https://security.example.org/guide',
   'Security research: send your OTP or your account will be blocked.',
@@ -689,6 +767,81 @@ const pageshowWaitedForStartupDelay = startupScans === 0;
 startupClock.advance(1);
 assertCase('lifecycle: pagehide cancels startup timer and a fresh pageshow schedule runs once',
   pagehideCanceledStartup && pageshowWaitedForStartupDelay && startupScans === 1);
+
+const fakeAnalysis = (score: number, hostname: string) => ({
+  url: `https://${hostname}/`,
+  hostname,
+  overallSeverity: score >= 40 ? 'threat' as const : 'safe' as const,
+  score,
+  findings: [],
+  suspicionReasons: [],
+  timestamp: score,
+});
+const tabStore = new TabAnalysisStore(3);
+const tabAAnalysis = fakeAnalysis(55, 'refund-test.example');
+const tabBAnalysis = fakeAnalysis(3, 'legitimate-login.example');
+tabStore.set(101, tabAAnalysis);
+tabStore.set(202, tabBAnalysis);
+assertCase('tab analysis store keeps independent analyses for two tabs',
+  tabStore.get(101)?.score === 55 && tabStore.get(202)?.score === 3);
+const openedTabA = tabStore.select(101);
+const openedTabB = tabStore.select(202);
+assertCase('opening the panel from each tab selects that tab analysis',
+  openedTabA?.score === 55 && openedTabB?.score === 3);
+const switchedBackToTabA = tabStore.select(101);
+const switchedToUnanalyzedTab = tabStore.select(606);
+const switchedBackToTabB = tabStore.select(202);
+assertCase('active-tab switching selects the matching analysis and clears missing-tab case',
+  switchedBackToTabA?.score === 55
+    && switchedToUnanalyzedTab === undefined
+    && switchedBackToTabB?.score === 3);
+const immutableCase = { ...tabAAnalysis, caseId: 'case-a' };
+const caseIdentity = analysisIdentity(immutableCase);
+immutableCase.score = 60;
+immutableCase.findings.push({
+  id: 'rdap-enrichment',
+  category: 'domain',
+  title: 'Recently registered domain',
+  severity: 'caution',
+  detail: 'Optional enrichment',
+  timestamp: Date.now(),
+});
+assertCase('engagement identity remains stable when optional enrichment updates a case',
+  analysisIdentity(immutableCase) === caseIdentity);
+tabStore.select(101);
+tabStore.setPasted(fakeAnalysis(70, 'pasted.local'));
+assertCase('pasted-text analysis does not overwrite stored page analysis',
+  tabStore.current?.score === 70 && tabStore.get(101)?.score === 55);
+tabStore.select(202);
+const removedTabSelected = tabStore.remove(202);
+assertCase('tab removal clears its analysis and selection',
+  removedTabSelected && tabStore.get(202) === undefined && tabStore.current === undefined);
+tabStore.set(303, fakeAnalysis(19, 'banking.example'));
+tabStore.set(404, fakeAnalysis(17, 'delivery.example'));
+tabStore.set(505, fakeAnalysis(22, 'newest.example'));
+assertCase('tab analysis store remains bounded and evicts the oldest tab',
+  tabStore.get(101) === undefined && tabStore.get(303)?.score === 19 && tabStore.get(505)?.score === 22);
+const evictionStore = new TabAnalysisStore(3);
+const evictionTabA = { ...fakeAnalysis(55, 'selected-refund.example'), caseId: 'eviction-a-old' };
+evictionStore.set(11, evictionTabA);
+evictionStore.set(22, fakeAnalysis(3, 'other-login.example'));
+evictionStore.set(33, fakeAnalysis(19, 'other-bank.example'));
+evictionStore.select(11);
+evictionStore.set(44, fakeAnalysis(17, 'new-delivery.example'));
+assertCase('evicting the selected tab clears selection without substituting another case',
+  evictionStore.get(11) === undefined
+    && evictionStore.selectedTab === undefined
+    && evictionStore.current === undefined
+    && evictionStore.get(22)?.score === 3);
+const reactivatedMissingTab = evictionStore.select(11);
+assertCase('reactivating an evicted tab with no stored analysis leaves no active case',
+  reactivatedMissingTab === undefined && evictionStore.current === undefined);
+const evictionTabANew = { ...fakeAnalysis(58, 'selected-refund.example'), caseId: 'eviction-a-new' };
+evictionStore.set(11, evictionTabANew);
+assertCase('reanalyzing an evicted active tab selects its new case normally',
+  evictionStore.current === evictionTabANew
+    && evictionStore.current.caseId === 'eviction-a-new'
+    && evictionStore.selectedTab === 11);
 
 const repeatedBrandLinkText = 'Read PayPal login information.';
 const repeatedBrandLinks = Array.from({ length: 10 }, () => ({
