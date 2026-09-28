@@ -33,13 +33,16 @@ export interface HoneypotEvent {
 // Offer the login on the persona's 3rd reply — after some rapport, before the scammer gives up
 export const LURE_TURN = 3;
 
+// Written as a favour, not an offer: the persona is asking the "helpful officer" to look at the
+// shop website their family set up, and mentions the shop's payments come through it — the bait
+// a scammer can't resist checking.
 const LURES: Record<string, string> = {
   suresh_pillai:
-    "sir one thing. my grandson made a website for my wife's saree shop, {shop}. i can never log in, always says wrong password. you know computers, can you check?\n{url}\nusername {user}\npassword {pass}\ntell me what you see",
+    "sir one small help. my grandson made a website for my wife's saree shop {shop}. all the shop payments come there he said. i cant login, always wrong password. you can check once?\n{url}\nid {user}\npassword {pass}",
   meera_desai:
-    'acha ek kaam karo please. my son made a website for our shop {shop}, i can never open it, some error aata hai. you check once?\n{url}\nusername {user}\npassword {pass}\nbatao kya dikh raha hai',
+    'acha ek kaam karoge? mere bete ne hamari dukaan {shop} ki website banayi hai, customer ke payment usi mein aate hai. mujhse login nahi hota, error aata hai. aap ek baar dekh lo\n{url}\nusername {user}\npassword {pass}',
   ramesh_bhat:
-    "Before we go on, could you look at something for me? My grandson built a website for our family shop, {shop}, and I've never managed to log in. You clearly know computers.\n{url}\nUsername {user}, password {pass}.\nLet me know what you see.",
+    "Before we continue, may I ask a small favour? My grandson made a website for our family shop, {shop}. He says the customer payments are received there, but I have never managed to log in. Could you please check?\n{url}\nUsername: {user}\nPassword: {pass}",
 };
 
 export const mapUrl = (lat: number, lon: number) =>

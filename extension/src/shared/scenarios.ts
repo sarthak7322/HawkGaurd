@@ -88,78 +88,102 @@ export function classifyScenario(message: string): ScamScenario {
 }
 
 // Template library — the LLM never sees the scammer's raw text.
-// It only sees: "generate a natural-sounding variation of this template
-// in the voice of {persona}", plus safe metadata.
+// It only sees: "rewrite this template in the voice of {persona}", plus safe metadata.
 //
-// Written the way people actually text on these calls: short, plain, a bit distracted,
-// asking questions back. Stalling works best when it sounds real, not theatrical.
+// The goal is to keep the scammer talking, so the decoy plays an easy mark who is TRYING:
+// willing, a bit slow, always one small step from doing what they ask. Every reply hands the
+// scammer something to do (explain a step, resend, wait), and doubts are soft enough that the
+// scammer thinks one more message will fix them. Flat refusals or "this is a fraud" end the chat.
+//
+// {family} is filled per persona (grandson, son…) before the AI ever sees the template.
 export const RESPONSE_TEMPLATES: Record<ScamScenario, string[]> = {
   payment_request: [
-    "ok but how to do upi. my grandson does all this for me",
-    "wait, which account? i have 2, one is very old",
-    "i'll have to ask my son first. he comes home by 7",
-    "can i just go to the branch tomorrow and pay there?",
-    "why do i have to pay if the mistake is from your side?",
+    "ok i opened phonepe. where do i put the id",
+    "how much you said? and it will come back after, no?",
+    "it is asking for pin. the atm pin or some other pin",
+    "my {family} set up gpay for me but i never sent money to anyone. what do i press",
+    "it says payment failed. should i try again",
+    "i will do it, just tell me slowly one by one",
+    "ok sending. it is showing some red message now",
+    "but why i have to pay, the mistake is from bank side no?",
   ],
   otp_solicitation: [
-    "some message came. which one? there are 3 messages",
-    "wait let me get my glasses. the numbers are very small",
-    "my daughter says never tell otp to anyone. why do you need it?",
-    "it says do not share this with anyone. is that ok?",
-    "the message went away. can you send it again",
+    "wait a message came just now. is this the one from bank",
+    "there are 3 messages from the bank. which one you want",
+    "the numbers are very small, let me get my glasses",
+    "it says do not share with anyone. but you are from the bank only no?",
+    "the message went away from the screen. can you send again",
+    "it says expired. can you send a new one",
+    "i was trying to copy it and it got deleted. sorry",
+    "it is asking me to press something. should i press yes",
   ],
   identity_verification: [
-    "aadhaar is in the almirah. give me 5 min",
-    "my son took my aadhaar for some work. can you call back in the evening?",
-    "why do you need all this? bank already has it no",
-    "which one, aadhaar or pan? i have both somewhere",
-    "hold on, let me find it",
+    "aadhaar is in the cupboard. give me few minutes",
+    "which one you want, aadhaar or pan? both are somewhere here",
+    "my {family} took my aadhaar card for some work. i have one photocopy, will that do?",
+    "i found the card but it is very faded. i cant read properly",
+    "bank already has all this no? i gave everything when i opened the account",
+    "you want the aadhaar number or the pan number?",
+    "hold on, let me find my glasses first",
   ],
   urgency_escalation: [
-    "ok ok please don't shout, i'm trying",
-    "one minute. can you speak slowly",
-    "why so urgent? i went to the bank only last week",
-    "i'm doing it only. phone is very slow today",
-    "please wait, somebody is at the door",
+    "ok ok i am doing it. please dont cut the call",
+    "please dont block it, all my savings are in that account",
+    "i am trying, my phone is very slow today",
+    "one minute, someone is at the door. dont go",
+    "i dont want any problem. just tell me what to do",
+    "i am getting scared now. what will happen if it gets blocked",
+    "tell me again slowly, i will write it down",
   ],
   link_click_bait: [
-    "which link? i don't see any link",
-    "i clicked. it's just loading and loading",
-    "it's asking to download something. should i?",
-    "screen went white. now what",
-    "can you send it on whatsapp? i can't open from sms",
+    "which link? i dont see any link",
+    "i pressed it. it is just loading",
+    "it is asking to download something. should i press ok",
+    "the screen went white. now what to do",
+    "it opened but the letters are very small. what do i fill",
+    "can you send on whatsapp? links from sms dont open in my phone",
+    "it is asking my name and number again. should i fill",
   ],
   account_info_request: [
-    "account number is in my passbook. let me find it",
-    "the card is upstairs. my knees are bad, it will take time",
-    "which number is cvv? front side or back side?",
-    "i have 2 cards. which bank you want?",
-    "wait, why do you need my card number for kyc?",
+    "account number is in the passbook. let me find it",
+    "the card is in the other room, one minute",
+    "which number, the long one on the front?",
+    "i have 2 cards, one old one new. which one you want",
+    "passbook last page is torn. is the first page ok",
+    "cvv means what? the small number on the back?",
+    "wait i think my card has expired. will the old one work",
   ],
   personal_details_request: [
-    "which address, old one or new one?",
-    "dob on my aadhaar is wrong actually. which one you want?",
-    "my name spelling is different on every card",
+    "which address, old one or the current one?",
+    "date of birth is different on my aadhaar and pan. which one you want",
+    "my name spelling is different on every card. which one",
+    "one sec, let me write down what you are asking",
+    "you want the full address with pincode?",
     "why you need all this? you are from the bank no",
-    "one sec, let me write it down first",
   ],
   reassurance_seeking: [
-    "how do i know you are really from the bank?",
-    "can you give me your office number? i'll call back",
-    "my son says so many fraud calls are coming these days",
-    "ok. what is your name and employee id?",
-    "i'll just go to the branch and ask them once, ok?",
+    "ok if you are from the bank then fine. what should i do",
+    "sorry, so many fraud calls come these days. what is your good name?",
+    "can you give your office number? just so i can tell my {family}",
+    "ok i trust you. but tell me slowly, i dont understand these things",
+    "i will do what you say. my money will be safe no?",
+    "what is your employee id? my {family} told me to always ask",
   ],
   unknown: [
-    "sorry, what?",
-    "didn't understand. say again",
-    "hello? network is very bad here",
+    "sorry didnt understand. say again?",
+    "hello? are you there",
     "one sec",
-    "what is this on my screen?",
+    "ok. what do i have to do now",
+    "sorry i was in the kitchen. what did you say",
+    "ok. then?",
   ],
 };
 
-export function pickTemplate(scenario: ScamScenario): string {
-  const templates = RESPONSE_TEMPLATES[scenario];
-  return templates[Math.floor(Math.random() * templates.length)];
+// Pick a template for this persona, avoiding any this chat has already used so the decoy
+// never repeats itself (a repeated line is the fastest way to sound like a bot).
+export function pickTemplate(scenario: ScamScenario, family = 'son', used: string[] = []): string {
+  const all = RESPONSE_TEMPLATES[scenario].map((t) => t.replace(/\{family\}/g, family));
+  const fresh = all.filter((t) => !used.includes(t));
+  const pool = fresh.length ? fresh : all;
+  return pool[Math.floor(Math.random() * pool.length)];
 }

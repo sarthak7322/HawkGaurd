@@ -92,7 +92,8 @@ export function App() {
 
     // The injection-resistant pipeline: classify → template → voice-only rewrite
     const scenario = classifyScenario(text);
-    const template = pickTemplate(scenario);
+    const used = messages.map((m) => m.trace?.template || '');
+    const template = pickTemplate(scenario, persona.family, used);
     const turn = messages.filter((m) => m.role === 'persona').length + 1;
     const started = Date.now();
     // Honeypot: on the lure turn the persona hands over the decoy login — fixed text, no AI
@@ -104,7 +105,7 @@ export function App() {
     await sleep(Math.max(0, 1500 - (Date.now() - started))); // feel like typing
 
     if (run !== runRef.current) return;
-    const replyText = reply.text.replace(/\{family_member\}/g, 'son');
+    const replyText = reply.text;
     const personaMsg: Msg = {
       id: uid(),
       role: 'persona',

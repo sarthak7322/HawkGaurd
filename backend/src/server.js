@@ -145,7 +145,8 @@ function validPersona(p) {
   return (
     p && str(p.displayName, 80) && Number.isFinite(Number(p.age)) && str(p.location) && str(p.occupation) &&
     str(p.personality, 600) && str(p.writingStyle, 600) &&
-    Array.isArray(p.quirks) && p.quirks.length <= 10 && p.quirks.every((q) => str(q, 200))
+    Array.isArray(p.quirks) && p.quirks.length <= 10 && p.quirks.every((q) => str(q, 200)) &&
+    (p.samples === undefined || (Array.isArray(p.samples) && p.samples.length <= 8 && p.samples.every((q) => str(q, 200))))
   );
 }
 
@@ -160,33 +161,35 @@ app.post('/api/generate-response', async (req, res) => {
     return res.json({ response: template });
   }
 
-  // Quirks every third message, rotating, so the decoy doesn't blame the network in every line.
+  // A habit roughly every fourth message, rotating, so it reads as a trait rather than a tic.
   // Chosen here (from the turn number), not left to the model, which can't see earlier messages.
   const turn = Math.min(Math.max(Number(turnNumber) || 1, 1), 50);
-  const quirk = turn % 3 === 0 && persona.quirks.length ? persona.quirks[(turn / 3 - 1) % persona.quirks.length] : null;
+  const quirk = turn % 4 === 0 && persona.quirks.length ? persona.quirks[(turn / 4 - 1) % persona.quirks.length] : null;
+  const samples = (persona.samples || []).map((s) => `- ${s}`).join('\n');
 
   // Constrained system prompt — the LLM's role is bounded to voice, never content
-  const systemPrompt = `You write one WhatsApp message from an older Indian person who is talking to a scammer without realising it. You get their profile and a short template of what they should say. Rewrite the template in their voice.
+  const systemPrompt = `You write one WhatsApp message from a real person who believes they are talking to a bank or government official. It is actually a scammer, but they don't know that. You get their profile, a few messages they really sent, and a short template of what to say next. Rewrite the template so it sounds exactly like them.
 
-How real people text on these calls:
-- Short. Usually 3 to 15 words. Never more than 2 sentences or 25 words.
-- Plain and casual. Fragments are fine, lowercase is fine, little punctuation.
-- No greetings or sign-offs. Never "dear", "kindly", "I would be grateful" or "much obliged". Use "sir" at most once, and only if their writing style mentions it.
-- Not theatrical. No speeches about health, feelings, family or the network unless the template or the quirk below brings it up.
-- A little distracted or unsure, like a real person: "wait", "ok", "hold on", "sorry what".
+The person is trying to cooperate. They are a bit slow with the phone, not stupid and not dramatic. The scammer must believe they are one step from getting what they want, so keep the tone willing, never suspicious or preachy unless the template itself asks a question like that.
+
+Sound like the person, not like someone playing them:
+- Match their sample messages: same length, same casing, same punctuation, same kind of words. The samples win over everything else here.
+- Write in the same language as their samples, even though the template is in English. If they text in Hinglish, the whole message is Hinglish.
+- A question stays a question, with a question mark.
+- The template's wording is only a rough draft of the meaning. Reword it freely so the grammar and phrasing are theirs: a careful English speaker fixes the template's broken English; a Hinglish speaker says it in Hinglish.
+- Short. Usually 4 to 14 words, never more than 2 short sentences.
+- Say what the template says and stop. No explanations of why, no feelings, no small talk added on top.
+- Don't start with a filler word ("wait", "ok", "hmm", "arey") unless the template does. Real people don't open every message the same way.
+- No greetings, sign-offs, emoji, asterisks, quotation marks or stage directions.
+- No proverbs, sayings or translations. No names of people, places or banks that aren't already in the template or profile.
+- A typo is fine only if their samples have typos.
 
 Rules you never break:
-- Keep the template's meaning. Add no new facts, promises, offers or names of people.
+- Keep the template's meaning. Add no new facts, promises or offers.
 - Never write real-looking numbers: no OTPs, UPI IDs, phone, card, account or Aadhaar numbers.
-- Return only the message text: no quotes, no labels, no explanation.
+- Return only the message text.
 
-Example
-Template: "wait let me get my glasses. the numbers are very small"
-Good (68, retired clerk, simple Indian English): "wait sir. glasses. cant read these small numbers"
-Good (54, homemaker, Hinglish): "ek minute, chashma dhundh rahi hoon. numbers bahut chhote hai"
-Bad: "Dear sir, kindly give me one moment as I need to retrieve my spectacles, my eyes are very weak these days."
-
-This is their message number ${turn} in the chat. Later messages can sound a bit more tired or impatient.`;
+This is their message number ${turn} in the chat.`;
 
   const userPrompt = `PERSONA:
 Name: ${persona.displayName}
@@ -195,17 +198,19 @@ Location: ${persona.location}
 Occupation: ${persona.occupation}
 Personality: ${persona.personality}
 Writing style: ${persona.writingStyle}
-${quirk ? `Work in this habit of theirs, briefly: ${quirk}` : 'Use none of their habits in this message.'}
+${samples ? `Messages they really sent (copy this voice):\n${samples}\n` : ''}${quirk ? `If it fits in a few words, hint at this habit of theirs: ${quirk}. Skip it if it would sound forced.` : 'Use none of their habits in this message.'}
 
 TEMPLATE:
 ${template}
 
-Write ${persona.displayName}'s message:`;
+${persona.displayName}'s message:`;
 
   try {
     const text = (await generate(systemPrompt, userPrompt, 120))
       .trim()
-      .replace(/^["']|["']$/g, ''); // strip stray quotes
+      .replace(/^["']|["']$/g, '') // strip stray quotes
+      .replace(/\*[^*]*\*/g, '') // and any *stage directions*
+      .trim();
 
     res.json({ response: text || template });
   } catch (err) {

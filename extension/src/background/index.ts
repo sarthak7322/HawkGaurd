@@ -207,7 +207,8 @@ async function draftResponse(sessionId: string): Promise<EngagementMessage> {
   const scenario = lastScammerMsg?.scenario || 'unknown';
 
   // Injection-resistant flow: pick template, then ask Claude to varnish it in persona voice
-  const template = pickTemplate(scenario);
+  const used = session.messages.filter((m) => m.role === 'persona').map((m) => m.template || '');
+  const template = pickTemplate(scenario, persona.family, used);
   const turnNumber = session.messages.filter((m) => m.role === 'persona').length + 1;
 
   // Honeypot: on the lure turn the persona hands over the decoy login — fixed text, never the LLM

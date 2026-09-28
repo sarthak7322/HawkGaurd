@@ -28,6 +28,7 @@ export async function generatePersonaResponse(
       occupation: persona.occupation,
       personality: persona.personality,
       writingStyle: persona.writingStyle,
+      samples: persona.samples,
       quirks: persona.quirks,
     },
     template: templateResponse,

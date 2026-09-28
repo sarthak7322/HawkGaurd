@@ -30,6 +30,8 @@ export interface Persona {
   occupation: string;
   personality: string;
   writingStyle: string;
+  family: string;               // who "helps with the phone": fills {family} in templates
+  samples: string[];            // real-voice example messages the AI imitates
   quirks: string[];
 }
 
