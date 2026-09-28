@@ -26,6 +26,7 @@ import {
   scenarioLabel as label,
   type PipelineTrace,
 } from '../ui/components';
+import { DEMO_WAVES, WaveField } from './alive';
 
 type Trace = PipelineTrace & { injection: boolean };
 
@@ -224,6 +225,9 @@ export function App() {
 
   return (
     <div className="app" id="demo">
+      <div className="app-backdrop" aria-hidden>
+        <WaveField waves={DEMO_WAVES} className="app-waves" />
+      </div>
       <header className="topbar" data-reveal>
         <div>
           <div className="section-eyebrow">● Live demo</div>

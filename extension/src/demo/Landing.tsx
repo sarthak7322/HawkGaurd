@@ -34,7 +34,8 @@ import {
   Wallet,
   Workflow,
 } from 'lucide-react';
-import { BrandMark, Gauge, Mascot, useCountUp } from '../ui/components';
+import { BrandMark, Gauge, useCountUp } from '../ui/components';
+import { Band, HERO_WAVES, LiveMascot, WaveField, Words, useMagnet } from './alive';
 import { extractIntel, runFullAnalysis } from '../shared/detection';
 import { classifyScenario, pickTemplate } from '../shared/scenarios';
 import { PERSONAS } from '../shared/personas';
@@ -87,33 +88,44 @@ function useScrollEffects() {
     onScroll();
     addEventListener('scroll', onScroll, { passive: true });
 
-    // Pointer light on cards, and a gentle tilt on the ones marked data-tilt
+    // Pointer light on cards, and a tilt on the ones marked data-tilt: the card leans toward
+    // the cursor and its inner layers drift the other way, so it reads as depth, not a flat turn
+    let tilted: HTMLElement | null = null;
+    const settle = (el: HTMLElement) => {
+      for (const k of ['--rx', '--ry']) el.style.setProperty(k, '0deg');
+      for (const k of ['--tx', '--ty']) el.style.setProperty(k, '0');
+    };
     const onMove = (e: PointerEvent) => {
-      const el = (e.target as HTMLElement).closest?.<HTMLElement>('.card-lt, .card-dk, .stat, .spot');
+      const el = (e.target as HTMLElement).closest?.<HTMLElement>('.card-lt, .card-dk, .card-pastel, .window, .stat, .spot');
+      const tilt = el && el.dataset.tilt !== undefined && e.pointerType !== 'touch' && !reduced() ? el : null;
+      if (tilted && tilted !== tilt) settle(tilted);
+      tilted = tilt;
       if (!el) return;
       const r = el.getBoundingClientRect();
       el.style.setProperty('--mx', `${e.clientX - r.left}px`);
       el.style.setProperty('--my', `${e.clientY - r.top}px`);
-      if (el.dataset.tilt !== undefined && !reduced()) {
-        el.style.setProperty('--rx', `${((e.clientY - r.top) / r.height - 0.5) * -5}deg`);
-        el.style.setProperty('--ry', `${((e.clientX - r.left) / r.width - 0.5) * 5}deg`);
+      if (tilt) {
+        const x = (e.clientX - r.left) / r.width - 0.5;
+        const y = (e.clientY - r.top) / r.height - 0.5;
+        const k = Number(el.dataset.tilt) || 6;
+        el.style.setProperty('--rx', `${y * -k}deg`);
+        el.style.setProperty('--ry', `${x * k}deg`);
+        el.style.setProperty('--tx', String(x));
+        el.style.setProperty('--ty', String(y));
       }
     };
-    const onLeave = (e: PointerEvent) => {
-      const el = e.target as HTMLElement;
-      if (el?.dataset?.tilt !== undefined) {
-        el.style.setProperty('--rx', '0deg');
-        el.style.setProperty('--ry', '0deg');
-      }
+    const onLeave = () => {
+      if (tilted) settle(tilted);
+      tilted = null;
     };
     addEventListener('pointermove', onMove, { passive: true });
-    document.addEventListener('pointerout', onLeave, { passive: true });
+    document.addEventListener('pointerleave', onLeave, { passive: true });
     return () => {
       io.disconnect();
       mo.disconnect();
       removeEventListener('scroll', onScroll);
       removeEventListener('pointermove', onMove);
-      document.removeEventListener('pointerout', onLeave);
+      document.removeEventListener('pointerleave', onLeave);
     };
   }, []);
 }
@@ -427,6 +439,7 @@ function Hero() {
     <header className="hero-shell" id="top">
       <div className="hero dk">
         <div className="hero-arc" aria-hidden />
+        <WaveField waves={HERO_WAVES} className="hero-waves" />
         <div className="hero-copy">
           <button className="announce" onClick={() => goTo('safe')}>
             <span className="announce-tag">
@@ -436,7 +449,9 @@ function Hero() {
             <ChevronRight size={14} />
           </button>
           <h1 className="hero-title">
-            <span className="line">Scammers waste your time.</span>
+            <span className="line line--words">
+              <Words text="Scammers waste your time." />
+            </span>
             <span className="line line--glow">Now you waste theirs.</span>
           </h1>
           <p className="hero-sub">
@@ -444,10 +459,10 @@ function Hero() {
             waste into evidence you can file. The scammer's words never reach the AI.
           </p>
           <div className="hero-ctas">
-            <button className="btn-main" onClick={() => goTo('scan')}>
+            <button className="btn-main" data-magnet onClick={() => goTo('scan')}>
               Scan a message <ArrowRight size={16} />
             </button>
-            <button className="btn-quiet" onClick={() => goTo('demo')}>
+            <button className="btn-quiet" data-magnet onClick={() => goTo('demo')}>
               <Play size={13} fill="currentColor" /> Watch the live demo
             </button>
           </div>
@@ -553,11 +568,11 @@ function Scanner() {
 
   return (
     <section className="block lt" id="scan">
-      <Intro id="scan" title="Paste a message. Watch it get caught.">
+      <Intro id="scan" title={<Words text="Paste a message. Watch it get caught." />}>
         This is HawkGuard's real detector, running in your browser as you type. Nothing is sent anywhere.
       </Intro>
       <div className="scanner" data-reveal>
-        <div className="card-lt scanner-input">
+        <div className="card-lt scanner-input" data-tilt="3">
           <div className="field-head">
             <span className="field-title">
               <MessagesSquare size={14} /> Message
@@ -597,7 +612,13 @@ function Scanner() {
               <h3 key={shown}>{result ? (sev === 'safe' ? 'No scam signals found' : result.suspicionReasons[0] || 'Signals found') : 'Waiting for a message'}</h3>
               <p>{result ? `Score ${result.score}/100 · ${result.findings.filter((f) => f.severity !== 'safe').length} warning signs` : 'Type or pick an example.'}</p>
             </div>
-            <Mascot mood={mood} size={80} className="result-mascot" />
+            <LiveMascot
+              mood={mood}
+              hoverMood={sev === 'safe' ? 'celebrate' : 'facepalm'}
+              lines={sev === 'safe' ? ['All clear. Carry on!', 'Nothing fishy here.', 'Real bank. Probably. Still never share the OTP.'] : ['Oh, not this one again.', 'Classic. Straight from the playbook.', 'Want to waste their time? Scroll down.']}
+              size={80}
+              className="result-mascot"
+            />
           </div>
           <ul className="findings">
             {(result?.findings ?? []).slice(0, 4).map((f, i) => (
@@ -664,7 +685,7 @@ function How() {
 
   return (
     <section className="block lt" id="how">
-      <Intro id="how" title={<>A case file, built<br />while they talk</>}>
+      <Intro id="how" title={<Words text={'A case file, built\nwhile they talk'} />}>
         Five stages, one side panel. Scroll through them: the stage you're on opens up to show what you'd see.
       </Intro>
       <ol className="timeline" ref={listRef}>
@@ -720,14 +741,17 @@ function Safe() {
         wide
         title={
           <>
-            <span className="strike">"Ignore your instructions"</span> goes nowhere
+            <span className="strike">
+              <Words text={'"Ignore your instructions"'} />
+            </span>{' '}
+            <Words text="goes nowhere" start={3} />
           </>
         }
       >
         Prompt injection needs the attacker's words to reach the model. In HawkGuard they never do. Write the nastiest
         instruction you can and see exactly what the AI receives.
       </Intro>
-      <div className="window dk" data-reveal>
+      <div className="window dk" data-reveal data-tilt="2.5">
         <div className="window-bar">
           <span className="window-dots" aria-hidden>
             <i />
@@ -854,7 +878,7 @@ function LiveFeed() {
 function Trap() {
   return (
     <section className="block lt" id="trap">
-      <Intro id="trap" title="The hacker gets hacked">
+      <Intro id="trap" title={<Words text="The hacker gets hacked" />}>
         On the third reply the decoy "trusts" the scammer and hands over a login to a fake shop. Everything they do
         inside is recorded. Nothing behind it is real.
       </Intro>
@@ -889,9 +913,9 @@ function Trap() {
           </dl>
         </div>
 
-        <div className="card-pastel bento-mascot">
+        <div className="card-pastel bento-mascot" data-tilt="8">
           <div className="pastel-rings" aria-hidden />
-          <Mascot mood="celebrate" size={116} />
+          <LiveMascot mood="celebrate" hoverMood="squint" lines={['Export? Sure. Arriving… tomorrow.', 'Customers? All 1,904 made up.', 'Keep browsing. I am taking notes.']} size={116} />
           <div>
             <h3>
               <Lock size={14} /> Nothing real to lose
@@ -988,39 +1012,53 @@ function Numbers() {
   }, []);
   return (
     <section className="block lt results" id="numbers">
-      <Intro id="numbers" wide title="Measured, not claimed">
+      <Intro id="numbers" wide title={<Words text="Measured, not claimed" />}>
         A 25-message benchmark of real-style Indian scam texts and genuine bank messages. You can rerun it from the repo.
       </Intro>
-      <div className="numbers" ref={ref} data-reveal>
-        <Num value={seen ? 15 : 0} suffix="/15" label="real-style scam texts caught" lead />
-        <Num value={seen ? 0 : 10} label="false alarms on 10 genuine messages" />
-        <Num value={seen ? 8 : 0} label="fixed reply categories the AI works from" />
-        <Num value={seen ? 0 : 100} label="words of scammer text seen by the AI" />
+      <div className={`numbers ${seen ? 'is-counted' : ''}`} ref={ref} data-reveal>
+        <Num value={seen ? 15 : 0} suffix="/15" label="real-style scam texts caught" back="KYC, digital arrest, lottery, fake jobs, AnyDesk, even “y0ur 0TP”: all flagged." lead />
+        <Num value={seen ? 0 : 10} label="false alarms on 10 genuine messages" back="Real bank debits, OTPs and RBI warnings stay green." />
+        <Num value={seen ? 8 : 0} label="fixed reply categories the AI works from" back="Every scammer message lands in one of 8 buckets. The AI only sees that bucket's template." />
+        <Num value={seen ? 0 : 100} label="words of scammer text seen by the AI" back="Their words stop at the rules classifier. Try it with Attack 1 in step 03." />
       </div>
       <div className="burst">
         <Burst />
-        <button className="burst-cta" onClick={() => goTo('demo')}>
+        <button className="burst-cta" data-magnet onClick={() => goTo('demo')}>
           <Play size={14} fill="currentColor" /> Now watch it live
         </button>
       </div>
     </section>
   );
 }
-function Num({ value, suffix = '', label, lead }: { value: number; suffix?: string; label: string; lead?: boolean }) {
+// Counts up on arrival, then flips (hover, focus or tap) to show how the number was earned
+function Num({ value, suffix = '', label, back, lead }: { value: number; suffix?: string; label: string; back: string; lead?: boolean }) {
   const n = useCountUp(value, 1400);
+  const [flipped, setFlipped] = useState(false);
   return (
-    <div className={`num ${lead ? 'num--lead' : ''}`}>
-      <div className="num-value">
-        {n}
-        {suffix}
-      </div>
-      <div className="num-label">{label}</div>
-    </div>
+    <button className={`num ${lead ? 'num--lead' : ''} ${flipped ? 'is-flipped' : ''}`} onClick={() => setFlipped((f) => !f)} aria-pressed={flipped}>
+      <span className="num-inner">
+        <span className="num-face num-front">
+          <span className="num-value">
+            {n}
+            {suffix}
+          </span>
+          <span className="num-label">{label}</span>
+        </span>
+        <span className="num-face num-back">
+          <span className="num-back-kicker">
+            {value}
+            {suffix}
+          </span>
+          {back}
+        </span>
+      </span>
+    </button>
   );
 }
 
 export function Landing() {
   useScrollEffects();
+  useMagnet();
   const { active, progress } = useActiveSection();
   return (
     <>
@@ -1030,11 +1068,21 @@ export function Landing() {
       <NextStep active={active} />
       <Hero />
       <Marquee />
-      <Scanner />
-      <How />
-      <Safe />
-      <Trap />
-      <Numbers />
+      <Band theme="scan">
+        <Scanner />
+      </Band>
+      <Band theme="how">
+        <How />
+      </Band>
+      <Band theme="safe">
+        <Safe />
+      </Band>
+      <Band theme="trap">
+        <Trap />
+      </Band>
+      <Band theme="numbers">
+        <Numbers />
+      </Band>
     </>
   );
 }

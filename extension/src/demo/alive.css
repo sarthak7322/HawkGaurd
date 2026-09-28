@@ -1,0 +1,265 @@
+/* The alive layer (see alive.tsx). Same palette, radii and curves as landing.css, plus one
+   spring for playful entrances. Each band is a chapter with its own texture and accent:
+   Try it (violet dots), Method (lavender contours), Safety (night grid), Honeypot (ember
+   honeycomb), Results (magenta rings). Dark and light alternate: hero, paper, paper, night,
+   paper, paper, night. Motion is transform/opacity only and stops under reduced motion. */
+
+:root { --spring: cubic-bezier(.34, 1.56, .64, 1); }
+
+/* ─── Headings that arrive word by word ───────── */
+.words .w, .words .ch { display: inline-block; }
+@keyframes word-in {
+  0% { opacity: 0; transform: translateY(.55em) scale(.55) rotate(6deg); filter: blur(6px); }
+  55% { opacity: 1; transform: translateY(-.08em) scale(1.08) rotate(-1deg); filter: blur(0); }
+  100% { transform: none; }
+}
+.hero-title .line--words { animation: none; }
+.hero-title .w { animation: word-in .95s var(--spring) both; animation-delay: calc(var(--i) * 90ms + 150ms); }
+.intro.is-in .w { animation: word-in .9s var(--spring) both; animation-delay: calc(var(--i) * 75ms + 120ms); }
+/* Letters hop in a ripple under the cursor */
+.words .w { transition: color .3s; }
+.words .w:hover .ch { animation: hop .6s var(--spring) both; animation-delay: calc(var(--c) * 32ms); }
+@keyframes hop { 35% { transform: translateY(-.16em) rotate(-5deg); } 65% { transform: translateY(.03em); } }
+.intro-title .w:hover { color: var(--violet); }
+.band--safe .intro-title .w:hover { color: #b9a6ff; }
+
+/* Second hero line grows in (small → large → settled), then keeps its shimmer */
+.hero-title .line--glow {
+  transform-origin: 0 60%; transition: scale .6s var(--spring), rotate .6s var(--spring);
+  animation: grow-in 1.1s var(--spring) .75s both, shimmer 7s linear 2s infinite !important;
+}
+@keyframes grow-in { 0% { opacity: 0; transform: scale(.6); filter: blur(10px); } 60% { opacity: 1; transform: scale(1.06); filter: blur(0); } 100% { transform: none; } }
+.hero-title .line--glow:hover { scale: 1.03; rotate: -1deg; }
+
+/* Proof chips pop in one after another */
+.hero-proof { animation: none; }
+.hero-proof span { animation: chip-pop .7s var(--spring) both; transition: transform .4s var(--spring), border-color .3s, color .3s; }
+.hero-proof span:nth-child(1) { animation-delay: 1.35s; }
+.hero-proof span:nth-child(2) { animation-delay: 1.5s; }
+.hero-proof span:nth-child(3) { animation-delay: 1.65s; }
+@keyframes chip-pop { from { opacity: 0; transform: translateY(10px) scale(.7); } }
+.hero-proof span:hover { transform: translateY(-3px); color: #fff; border-color: rgba(79, 224, 168, .4); }
+.hero-proof svg { transition: transform .5s var(--spring); }
+.hero-proof span:hover svg { transform: scale(1.35) rotate(-12deg); }
+
+/* ─── Waves ───────────────────────────────────── */
+.wavefield { position: absolute; overflow: hidden; pointer-events: none; }
+.wave {
+  position: absolute; left: 0; bottom: 0; width: 200%; height: 100%;
+  animation: wave-slide var(--dur) linear infinite, wave-bob var(--bob) ease-in-out infinite alternate;
+}
+.wave--rev { animation-direction: reverse, alternate; }
+@keyframes wave-slide { to { transform: translateX(-50%); } }
+@keyframes wave-bob { from { translate: 0 -7px; } to { translate: 0 9px; } }
+.hero-waves {
+  inset: auto 0 0; height: 48%; z-index: -1;
+  mask-image: linear-gradient(180deg, transparent, #000 45%); -webkit-mask-image: linear-gradient(180deg, transparent, #000 45%);
+}
+.app-backdrop { position: absolute; inset: 0; z-index: -1; border-radius: inherit; overflow: hidden; pointer-events: none; }
+.app-waves {
+  inset: auto 0 0; height: 36%;
+  mask-image: linear-gradient(180deg, transparent, #000 50%); -webkit-mask-image: linear-gradient(180deg, transparent, #000 50%);
+}
+
+/* ─── Bands: one backdrop per chapter ─────────── */
+.band { position: relative; isolation: isolate; }
+.band > section { position: relative; z-index: 1; }
+.band-bg { position: absolute; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+.band-texture { position: absolute; inset: 0; }
+.band-waves {
+  inset: auto 0 0; height: 260px;
+  mask-image: linear-gradient(180deg, transparent, #000 35%, #000 62%, transparent);
+  -webkit-mask-image: linear-gradient(180deg, transparent, #000 35%, #000 62%, transparent);
+}
+
+/* 01 Try it: violet signal dots */
+.band--scan { --accent: var(--violet); }
+.band--scan .band-texture {
+  background: radial-gradient(rgba(123, 92, 255, .24) 1.2px, transparent 1.7px) 0 0 / 24px 24px;
+  mask-image: radial-gradient(55% 45% at 82% 22%, #000, transparent 75%); -webkit-mask-image: radial-gradient(55% 45% at 82% 22%, #000, transparent 75%);
+}
+.band--scan .band-bg::after { content: ''; position: absolute; left: -10%; top: 20%; width: 45%; height: 60%; border-radius: 50%; background: radial-gradient(closest-side, rgba(123, 92, 255, .1), transparent); }
+
+/* 02 Method: lavender daylight with contour lines */
+.band--how {
+  --accent: #2a9fbf;
+  background: linear-gradient(180deg, transparent, rgba(228, 216, 255, .55) 22%, rgba(214, 240, 248, .45) 78%, transparent);
+}
+.band--how .band-texture {
+  background: repeating-radial-gradient(ellipse 110% 70% at 105% 30%, transparent 0 38px, rgba(123, 92, 255, .12) 39px 40px);
+  mask-image: radial-gradient(50% 60% at 90% 35%, #000, transparent 80%); -webkit-mask-image: radial-gradient(50% 60% at 90% 35%, #000, transparent 80%);
+}
+
+/* 03 Safety: the night vault, framed like the hero */
+.band--safe {
+  --accent: #35bfdc;
+  margin: 140px 12px 0; border-radius: var(--r-xl);
+  background:
+    radial-gradient(50% 60% at 88% 0%, rgba(53, 191, 220, .18), transparent 70%),
+    radial-gradient(45% 50% at 0% 100%, rgba(123, 92, 255, .3), transparent 70%),
+    var(--night);
+}
+.band--safe .band-bg { border-radius: inherit; }
+.band--safe .band-texture {
+  background:
+    linear-gradient(rgba(255, 255, 255, .045) 1px, transparent 1px) 0 0 / 44px 44px,
+    linear-gradient(90deg, rgba(255, 255, 255, .045) 1px, transparent 1px) 0 0 / 44px 44px;
+  mask-image: radial-gradient(70% 60% at 50% 30%, #000, transparent 80%); -webkit-mask-image: radial-gradient(70% 60% at 50% 30%, #000, transparent 80%);
+}
+/* A slow scan line sweeping down the grid */
+.band--safe .band-texture::after {
+  content: ''; position: absolute; left: 0; right: 0; top: -30%; height: 30%;
+  background: linear-gradient(180deg, transparent, rgba(53, 191, 220, .09) 70%, rgba(53, 191, 220, .22) 99%, transparent);
+  animation: scanline 11s linear infinite;
+}
+@keyframes scanline { to { transform: translateY(440%); } }
+.band--safe > .block { padding-top: 110px; padding-bottom: 72px; }
+.band--safe .intro-title { color: #fff; }
+.band--safe .intro-label { color: #d5d2e2; }
+.band--safe .intro-icon { background: var(--iris); }
+.band--safe .intro-step { color: #8e8b9f; }
+.band--safe .intro-copy { color: #bdbacb; }
+.band--safe .strike { color: #8e8b9f; }
+.band--safe .section-next { color: #a9a6b8; border-color: rgba(255, 255, 255, .1); }
+.band--safe .link-next { color: #fff; }
+.band--safe .window { box-shadow: 0 0 0 1px rgba(255, 255, 255, .05), 0 50px 110px -40px rgba(53, 191, 220, .35), 0 30px 60px -30px rgba(0, 0, 0, .8); }
+
+/* 04 Honeypot: warm light over a honeycomb */
+.band--trap {
+  --accent: var(--ember);
+  background: linear-gradient(180deg, transparent, rgba(255, 225, 207, .6) 22%, rgba(245, 220, 242, .5) 72%, transparent);
+}
+.band--trap .band-texture {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='49' viewBox='0 0 28 49'%3E%3Cpath d='M13.99 9.25l13 7.5v15l-13 7.5L1 31.75v-15l12.99-7.5zM3 17.9v12.7l10.99 6.34 11-6.35V17.9l-11-6.34L3 17.9zM0 15l12.98-7.5V0h-2v6.35L0 12.69v2.3zm0 18.5L12.98 41v8h-2v-6.85L0 35.81v-2.3zM15 0v7.5L27.99 15H28v-2.31h-.01L17 6.35V0h-2zm0 49v-8l12.99-7.5H28v2.31h-.01L17 42.15V49h-2z' fill='%23ff7a45' fill-opacity='.16' fill-rule='evenodd'/%3E%3C/svg%3E");
+  mask-image: radial-gradient(50% 55% at 92% 32%, #000, transparent 75%); -webkit-mask-image: radial-gradient(50% 55% at 92% 32%, #000, transparent 75%);
+}
+
+/* 05 Results: rings spreading out like a signal */
+.band--numbers { --accent: var(--magenta); }
+.band--numbers .band-texture {
+  background: repeating-radial-gradient(circle at 8% 26%, transparent 0 44px, rgba(217, 68, 156, .11) 45px 46px);
+  mask-image: radial-gradient(40% 45% at 8% 26%, #000, transparent 80%); -webkit-mask-image: radial-gradient(40% 45% at 8% 26%, #000, transparent 80%);
+}
+.band--numbers .band-waves { inset: 120px 0 auto; }
+
+/* ─── Symbols that notice you ─────────────────── */
+.floaty {
+  position: absolute; z-index: 2; width: 48px; height: 48px; margin: -24px 0 0 -24px; cursor: default;
+  translate: var(--fx, 0) var(--fy, 0); transition: translate .8s var(--ease);
+}
+.floaty-bob { display: block; width: 100%; height: 100%; animation: float-bob var(--bob) ease-in-out var(--delay) infinite alternate; }
+@keyframes float-bob { from { transform: translateY(-6px) rotate(-5deg); } to { transform: translateY(6px) rotate(4deg); } }
+.floaty-face {
+  position: relative; display: grid; place-items: center; width: 100%; height: 100%; border-radius: 16px;
+  color: var(--accent); background: rgba(255, 255, 255, .78); border: 1px solid var(--line); box-shadow: var(--shadow-lt);
+  transition: transform .5s var(--spring), background .3s, color .3s, box-shadow .3s;
+}
+.floaty-face svg { position: absolute; transition: opacity .3s, transform .55s var(--spring); }
+.floaty-b { opacity: 0; transform: rotate(-90deg) scale(.4); }
+.floaty.is-on .floaty-a { opacity: 0; transform: rotate(90deg) scale(.4); }
+.floaty.is-on .floaty-b { opacity: 1; transform: none; }
+.floaty.is-on .floaty-face { transform: scale(1.14); color: #fff; background: var(--accent); box-shadow: 0 14px 30px -12px var(--accent); animation: wiggle .65s var(--ease); }
+@keyframes wiggle { 20% { rotate: -12deg; } 40% { rotate: 10deg; } 60% { rotate: -6deg; } 80% { rotate: 3deg; } }
+.floaty-say {
+  position: absolute; left: -4px; bottom: calc(100% + 12px); width: max-content; max-width: 230px; pointer-events: none;
+  padding: 8px 12px; border-radius: 12px 12px 12px 4px; font: 600 12.5px/1.35 var(--font); color: #fff; background: var(--night);
+  box-shadow: 0 12px 30px -12px rgba(20, 10, 50, .6);
+  opacity: 0; translate: 0 8px; scale: .85; transform-origin: 0 100%;
+  transition: opacity .2s, translate .45s var(--spring), scale .45s var(--spring);
+}
+.floaty--right .floaty-say { left: auto; right: -4px; border-radius: 12px 12px 4px 12px; transform-origin: 100% 100%; }
+.floaty.is-on .floaty-say { opacity: 1; translate: 0 0; scale: 1; }
+.band--safe .floaty-face { color: #7fdcef; background: rgba(255, 255, 255, .06); border-color: rgba(255, 255, 255, .12); box-shadow: 0 12px 30px -14px rgba(0, 0, 0, .9); }
+.band--safe .floaty.is-on .floaty-face { color: var(--night); background: #7fdcef; }
+.band--safe .floaty-say { color: var(--ink); background: #fff; }
+
+/* ─── Mascot with something to say ────────────── */
+.live-mascot { position: relative; display: inline-flex; flex: 0 0 auto; cursor: pointer; }
+.live-mascot.is-hover .mascot { animation: mascot-hop .75s var(--spring); }
+@keyframes mascot-hop { 30% { transform: translateY(-10px) rotate(-8deg) scale(1.06); } 60% { transform: translateY(0) rotate(4deg); } }
+.mascot-bubble {
+  position: absolute; z-index: 5; right: calc(100% + 4px); top: 8px; width: max-content; max-width: 190px; pointer-events: none;
+  padding: 8px 12px; border-radius: 14px 14px 4px 14px; font: 600 12.5px/1.35 var(--font); color: var(--ink); background: #fff;
+  box-shadow: 0 14px 34px -14px rgba(20, 10, 50, .55);
+  opacity: 0; transform: translateX(8px) scale(.85); transform-origin: 100% 100%; transition: opacity .2s, transform .45s var(--spring);
+}
+.live-mascot.is-hover .mascot-bubble { opacity: 1; transform: none; }
+.bento-mascot .mascot-bubble { right: auto; left: 64%; top: -2px; border-radius: 14px 14px 14px 4px; transform-origin: 0 100%; color: #fff; background: var(--night); }
+
+/* ─── Cards: lean toward the cursor, inner layers drift for depth ── */
+.window[data-tilt] { transition: transform .6s var(--ease), box-shadow .5s; }
+[data-tilt] > * { translate: calc(var(--tx, 0) * -7px) calc(var(--ty, 0) * -7px); transition: translate .6s var(--ease); }
+.card-pastel[data-tilt] { transition: transform .5s var(--ease), box-shadow .5s; }
+.bento-mascot[data-tilt]:hover { transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) translateY(-3px); }
+/* Idle float on the small cards, so the bento breathes even when you don't touch it */
+.bento-print { animation: card-float 7s ease-in-out infinite alternate; }
+.bento-mascot { animation: card-float 8s ease-in-out -3s infinite alternate; }
+@keyframes card-float { from { translate: 0 -4px; } to { translate: 0 5px; } }
+
+/* Method: the current stage's node pulses; nodes wiggle when poked */
+.stage-node::after { content: ''; position: absolute; inset: -6px; border-radius: 22px; border: 2px solid rgba(123, 92, 255, .45); opacity: 0; pointer-events: none; }
+.is-current .stage-node::after { animation: ring 2.4s ease-out infinite; }
+@keyframes ring { from { transform: scale(.92); opacity: 1; } to { transform: scale(1.28); opacity: 0; } }
+.stage-node svg { transition: transform .5s var(--spring); }
+.stage-node:hover svg { transform: rotate(-14deg) scale(1.15); }
+
+/* ─── Section intros and side messages ────────── */
+.intro.is-in .intro-icon { animation: icon-pop .8s var(--spring) .1s both; }
+@keyframes icon-pop { 0% { transform: scale(.3) rotate(-40deg); opacity: 0; } 100% { transform: none; } }
+.intro:hover .intro-icon { animation: wiggle .65s var(--ease); }
+.intro.is-in .intro-copy { animation: slide-side .9s var(--ease) .45s both; }
+@keyframes slide-side { from { opacity: 0; transform: translateX(28px); } }
+.section-next.is-in > span { animation: slide-side .9s var(--ease) .15s both; }
+.link-next svg { animation: nudge 3.2s var(--ease) infinite; }
+.link-next:hover svg { animation: none; }
+@keyframes nudge { 0%, 72%, 100% { transform: none; } 82% { transform: translateX(5px); } 90% { transform: translateX(-1px); } }
+
+/* ─── Buttons lean toward a nearby cursor ─────── */
+[data-magnet] { translate: var(--mgx, 0) var(--mgy, 0); }
+.btn-main, .burst-cta { transition: transform .35s var(--ease), box-shadow .35s var(--ease), background-position .6s var(--ease), translate .6s var(--ease); }
+.btn-quiet { transition: background .2s, border-color .2s, transform .35s var(--ease), translate .6s var(--ease); }
+
+/* ─── Results: count up, pop, flip for the proof ─ */
+.num { appearance: none; border: 0; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; perspective: 1000px; text-align: center; }
+.num-inner { position: relative; display: grid; height: 100%; transform-style: preserve-3d; transition: transform .8s var(--spring); }
+.num-face {
+  grid-area: 1 / 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 16px 20px 36px; border-radius: var(--r-lg); backface-visibility: hidden; -webkit-backface-visibility: hidden;
+}
+.num-front { transition: background .3s; }
+.num-value { display: inline-block; }
+.num-label { display: block; }
+.numbers.is-counted .num-value { animation: count-pop .7s var(--spring) 1.35s; }
+@keyframes count-pop { 40% { transform: scale(1.12); } }
+.num-back {
+  transform: rotateY(180deg); margin-bottom: 16px; padding: 20px; gap: 8px;
+  font-size: 14px; line-height: 1.5; color: #d5d2e2; background: linear-gradient(160deg, #1d1928, #100e17 70%); box-shadow: var(--shadow-dk);
+}
+.num-back-kicker {
+  font-family: var(--display); font-size: 26px; font-weight: 600; letter-spacing: -0.03em; line-height: 1;
+  background: var(--iris); -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.num.is-flipped .num-inner { transform: rotateY(180deg); }
+@media (hover: hover) {
+  .num:hover .num-inner { transform: rotateY(180deg); }
+  .num.is-flipped:hover .num-inner { transform: rotateY(180deg); }
+}
+.num:focus-visible { outline: none; }
+.num:focus-visible .num-inner { transform: rotateY(180deg); }
+
+/* ─── Small screens ───────────────────────────── */
+@media (max-width: 1300px) { .floaty--side { display: none; } }
+@media (max-width: 760px) {
+  .floaty { display: none; }
+  .band--safe { margin: 96px 8px 0; border-radius: 28px; }
+  .band--safe > .block { padding-top: 72px; padding-bottom: 48px; }
+  .mascot-bubble { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wave, .floaty-bob, .band--safe .band-texture::after, .words .w, .words .ch, .hero-title .line--glow, .hero-proof span,
+  .live-mascot .mascot, .intro-icon, .intro-copy, .section-next > span, .link-next svg, .num-value, .stage-node::after,
+  .floaty-face, .bento-print, .bento-mascot { animation: none !important; }
+  .num-inner, .floaty, [data-magnet], [data-tilt] > * { transition: none !important; }
+  [data-magnet], [data-tilt] > * { translate: none !important; }
+}

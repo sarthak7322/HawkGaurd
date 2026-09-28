@@ -5,6 +5,7 @@ import { Footer, Landing } from './Landing';
 import '../ui/modern.css';
 import './demo.css';
 import './landing.css';
+import './alive.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
