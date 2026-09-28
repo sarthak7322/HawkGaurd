@@ -102,7 +102,7 @@ function detectionText(text: string): string {
 // ── Building blocks ──────────────────────────────────────────
 const ASK = '(?:please\\s+|kindly\\s+)*(?:share|send|give|tell|provide|enter|submit|verify|confirm|read\\s*out|forward|resend|reply\\s*with|type|update|renew|reactivate)';
 const CRED = '(?:otp|one[\\s-]?time[\\s-]?password|cvv|c\\.v\\.v|\\bpin\\b|mpin|upi\\s*pin|password|passcode|aadhaar(?:\\s*(?:card|number))?|pan(?:\\s*(?:card|number))?|kyc|card\\s*(?:number|details)|(?:bank\\s*)?account\\s*(?:number|details)|net\\s*banking)';
-const SENSITIVE_FIELD_PATTERN = /(?:password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|cc-(?:number|exp(?:-month|-year)?|csc))/i;
+const SENSITIVE_FIELD_PATTERN = /(?:password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|usn|student[\s_-]*(?:id|number)|registration[\s_-]*number|date[\s_-]*of[\s_-]*birth|\bdob\b|cc-(?:number|exp(?:-month|-year)?|csc))/i;
 const PAYMENT_FIELD_PATTERN = /(?:cvv|c\.v\.v|card|cc-(?:number|exp(?:-month|-year)?|csc))/i;
 
 // Positive categories. Each match adds `weight`; the finding's own severity drives display colour.
@@ -365,6 +365,7 @@ const AUTHORITY = [
 ];
 const BRANDS = [
   rx('\\bsbi\\b|state\\s+bank'), rx('\\bhdfc\\b'), rx('\\bicici\\b'), rx('axis\\s+bank'), rx('\\bkotak\\b'),
+  rx('\\bmsrit\\b|ramaiah institute of technology'),
   rx('\\bpaytm\\b'), rx('\\bphonepe\\b'), rx('\\bgpay\\b|google\\s+pay'), rx('\\bamazon\\b'), rx('\\bflipkart\\b'),
   rx('\\bnetflix\\b'), rx('\\bwhatsapp\\b'), rx('\\bnpci\\b'), rx('\\bmyntra\\b'), rx('\\bpnb\\b|punjab\\s+national'),
 ];
@@ -549,6 +550,7 @@ const BRAND_DOMAIN_RULES = [
   { name: 'SBI', pattern: /\bsbi\b|state\s+bank\s+of\s+india/i, domains: ['sbi.bank.in', 'sbi.co.in', 'onlinesbi.sbi'] },
   { name: 'HDFC Bank', pattern: /\bhdfc\b/i, domains: ['hdfc.bank.in', 'hdfcbank.com'] },
   { name: 'ICICI Bank', pattern: /\bicici\b/i, domains: ['icici.bank.in', 'icicibank.com'] },
+  { name: 'MSRIT', pattern: /\bmsrit\b|ramaiah institute of technology/i, domains: ['msrit.edu'] },
   { name: 'Axis Bank', pattern: /\baxis\s+bank\b/i, domains: ['axis.bank.in', 'axisbank.com'] },
   { name: 'Kotak', pattern: /\bkotak\b/i, domains: ['kotak.bank.in', 'kotak.com'] },
   { name: 'PNB', pattern: /\bpnb\b|punjab\s+national\s+bank/i, domains: ['pnb.bank.in', 'pnbindia.in'] },
@@ -616,29 +618,56 @@ function editDistanceAtMostOne(a: string, b: string): boolean {
 function brandHostnameEvidence(hostname: string, rule?: typeof BRAND_DOMAIN_RULES[number]): string[] {
   const allowedRules = rule ? [rule] : BRAND_DOMAIN_RULES;
   const labels = canonicalHostname(hostname).split('.');
-  const candidates = labels.flatMap((label) => normalizeConfusables(label).split('-').filter(Boolean).map((token) => token.replace(/1/g, 'l').replace(/0/g, 'o')));
-  const joinedLabels = labels.map((label) => normalizeConfusables(label).replace(/-/g, '').replace(/1/g, 'l').replace(/0/g, 'o'));
+  const normalizedLabels = labels.map((label) => normalizeConfusables(label).replace(/1/g, 'l').replace(/0/g, 'o'));
+  const tokenizedLabels = normalizedLabels.map((label) => label.split('-'));
+  const deceptiveTerms = 'login|secure|security|verify|account|support|payment|bank|wallet|portal|official|college|student|admission|fees|pay|kyc|update|service|online|signin';
   const matched: string[] = [];
   for (const brandRule of allowedRules) {
     const brand = brandRule.name.toLowerCase().replace(/[^a-z0-9]/g, '');
     const aliases = (BRAND_DOMAIN_ALIASES[brandRule.name] || []).map((alias) => alias.toLowerCase());
     const official = isOfficialDomainForBrand(hostname, brandRule);
-    const exactOrTypo = candidates.some((candidate) => editDistanceAtMostOne(candidate, brand));
-    const deceptiveSuffix = joinedLabels.some((label) =>
-      [brand, ...aliases].some((name) =>
-        label.startsWith(name) && label.length > name.length
-          && /^(?:login|secure|security|verify|account|support|service|online|payment|signin|update|bank|-)/.test(label.slice(name.length))
-      )
+    const names = [brand, ...aliases];
+    const standaloneOrTypo = normalizedLabels.some((label) =>
+      names.some((name) => editDistanceAtMostOne(label, name))
     );
-    const separatedBrandClaim = labels.some((label) =>
-      [brand, ...aliases].some((name) => label.startsWith(`${name}-`) || label === name)
+    const typoInDeceptiveConstruction = tokenizedLabels.some((tokens) =>
+      tokens.length > 1
+        && names.some((name) => editDistanceAtMostOne(tokens[0], name))
+        && new RegExp(`^(?:${deceptiveTerms})(?:-|$)`).test(tokens.slice(1).join('-'))
     );
-    const hyphenJoinedBrand = joinedLabels.some((label) =>
-      [brand, ...aliases].some((name) => label.startsWith(name) && label !== name)
+    const deceptiveSuffix = normalizedLabels.some((label) =>
+      names.some((name) => {
+        if (!label.startsWith(name) || label.length === name.length) return false;
+        return new RegExp(`^-?(?:${deceptiveTerms})(?:-|$)`).test(label.slice(name.length));
+      })
     );
-    if (!official && (exactOrTypo || deceptiveSuffix || separatedBrandClaim || hyphenJoinedBrand)) matched.push(brandRule.name);
+    const exactBrandLabel = normalizedLabels.some((label) => names.includes(label));
+    if (!official && (standaloneOrTypo || typoInDeceptiveConstruction || deceptiveSuffix || exactBrandLabel)) {
+      matched.push(brandRule.name);
+    }
   }
   return matched;
+}
+
+function hasDeceptiveBrandConstruction(hostname: string, rule: typeof BRAND_DOMAIN_RULES[number]): boolean {
+  const labels = canonicalHostname(hostname).split('.')
+    .map((label) => normalizeConfusables(label).replace(/1/g, 'l').replace(/0/g, 'o'));
+  const brand = rule.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const names = [brand, ...(BRAND_DOMAIN_ALIASES[rule.name] || []).map((alias) => alias.toLowerCase())];
+  const deceptiveTerms = /^-?(?:login|secure|security|verify|account|support|payment|bank|wallet|portal|official|college|student|admission|fees|pay|kyc|update|service|online|signin)(?:-|$)/;
+  return labels.some((label) => names.some((name) =>
+    label.startsWith(name) && label.length > name.length && deceptiveTerms.test(label.slice(name.length))
+  ));
+}
+
+function isNonDeceptiveBrandAffiliate(
+  sourceHostname: string,
+  destinationHostname: string,
+  rule: typeof BRAND_DOMAIN_RULES[number],
+): boolean {
+  return isOfficialDomainForBrand(sourceHostname, rule)
+    && brandHostnameEvidence(destinationHostname, rule).length > 0
+    && !hasDeceptiveBrandConstruction(destinationHostname, rule);
 }
 
 function detectBrandDomainMismatch(
@@ -677,7 +706,7 @@ function detectBrandDomainMismatch(
 
       for (const localText of localContexts) {
         const localBrandClaim = rule.pattern.test(localText)
-          && /\b(?:login|log\s*in|sign[ -]?in|verify|verification|account|password|passcode|otp|pin|cvv|card|suspended|blocked|restore|reactivate)\b/i.test(localText);
+          && /\b(?:login|log\s*in|sign[ -]?in|verify|verification|account|password|passcode|otp|pin|cvv|card|suspended|blocked|restore|reactivate|usn|student[\s_-]*(?:id|number|portal)|registration[\s_-]*number|date[\s_-]*of[\s_-]*birth|dob|admission|fees)\b/i.test(localText);
         if (!localBrandClaim) continue;
         if (hostnameClaim) {
           strong = true;
@@ -885,25 +914,45 @@ function analyzeLinks(text: string, linkUrls: string[] = [], pageHostname = '', 
   let score = 0;
   const findings: ForensicFinding[] = [];
   const reasons: string[] = [];
+  const currentHost = pageHostname ? canonicalHostname(pageHostname) : '';
   for (const u of urls.slice(0, 30)) {
     const host = hostFromUrl(u);
     const normalizedHost = host ? canonicalHostname(host) : '';
-    const currentHost = pageHostname ? canonicalHostname(pageHostname) : '';
     if (!normalizedHost || seen.has(normalizedHost) || normalizedHost === currentHost) continue;
     seen.add(normalizedHost);
     const r = analyzeDomain(normalizedHost, 'link');
+    const sourceBrand = BRAND_DOMAIN_RULES.find((rule) =>
+      currentHost && isOfficialDomainForBrand(currentHost, rule)
+    );
+    const affiliatedBrandDestination = !!sourceBrand
+      && isNonDeceptiveBrandAffiliate(currentHost, normalizedHost, sourceBrand);
+    const retainedSignals = r.findings
+      .map((finding, index) => ({ finding, reason: r.reasons[index] }))
+      .filter(({ finding }) => finding.title !== 'Hyphen-heavy hostname'
+        && !(affiliatedBrandDestination && finding.title === 'Brand-lookalike domain'));
+    const retainedWeights: Record<string, number> = {
+      'Suspicious TLD': 12,
+      'Less-common TLD': 4,
+      'Brand-lookalike domain': 8,
+      'URL shortener': 8,
+      'Raw IP address': 10,
+    };
+    const retainedScore = Math.min(
+      retainedSignals.reduce((total, { finding }) => total + (retainedWeights[finding.title] || 0), 0),
+      18,
+    );
     if (currentHost) {
       const currentRegistrable = getDomainParts(currentHost).registrableDomain;
       const linkRegistrable = getDomainParts(normalizedHost).registrableDomain;
       const sameSite = currentRegistrable && currentRegistrable === linkRegistrable;
-      const meaningfulSubdomainRisk = r.findings.some((f) =>
-        f.title === 'Brand-lookalike domain' || f.title === 'URL shortener'
+      const meaningfulSubdomainRisk = retainedSignals.some(({ finding }) =>
+        finding.title === 'Brand-lookalike domain' || finding.title === 'URL shortener'
       );
       if (sameSite && !meaningfulSubdomainRisk) continue;
     }
-    score += r.score;
-    findings.push(...r.findings);
-    reasons.push(...r.reasons);
+    score += retainedScore;
+    findings.push(...retainedSignals.map(({ finding }) => finding));
+    reasons.push(...retainedSignals.flatMap(({ reason }) => reason ? [reason] : []));
   }
   for (const link of linkMetadata.slice(0, 30)) {
     const rule = brandRuleForText(link.label);
@@ -912,7 +961,9 @@ function analyzeLinks(text: string, linkUrls: string[] = [], pageHostname = '', 
     if (!href || isOfficialDomainForBrand(href, rule)) continue;
     const destination = analyzeDomain(href, 'link');
     const identityText = /\b(?:login|log\s*in|sign[ -]?in|account|verification|verify|support|payment|wallet)\b/i.test(link.label);
-    const riskyDestination = brandHostnameEvidence(href, rule).length > 0
+    const affiliatedBrandDestination = currentHost
+      && isNonDeceptiveBrandAffiliate(currentHost, href, rule);
+    const riskyDestination = (!affiliatedBrandDestination && brandHostnameEvidence(href, rule).length > 0)
       || destination.findings.some((finding) => ['Suspicious TLD', 'URL shortener', 'Raw IP address'].includes(finding.title));
     if (!identityText || !riskyDestination) continue;
     const brandDestinationKey = `${rule.name}:${canonicalHostname(href)}`;

@@ -1,7 +1,7 @@
 import type { FormMetadata } from '../shared/types';
 
-const SENSITIVE_FIELD_PATTERN = /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|cc-(?:number|exp(?:-month|-year)?|csc))/i;
-const DESCRIBED_FIELD_PATTERN = /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|email|username|cc-(?:number|exp(?:-month|-year)?|csc))/i;
+const SENSITIVE_FIELD_PATTERN = /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|usn|student[\s_-]*(?:id|number)|registration[\s_-]*number|date[\s_-]*of[\s_-]*birth|\bdob\b|cc-(?:number|exp(?:-month|-year)?|csc))/i;
+const DESCRIBED_FIELD_PATTERN = /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|usn|student[\s_-]*(?:id|number)|registration[\s_-]*number|date[\s_-]*of[\s_-]*birth|\bdob\b|email|username|cc-(?:number|exp(?:-month|-year)?|csc))/i;
 
 export function boundedElements(
   root: Node,

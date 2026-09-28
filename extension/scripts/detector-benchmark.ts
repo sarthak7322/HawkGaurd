@@ -1,4 +1,4 @@
-import { checkDomainAge, getDomainParts, normalizeUnicode, runFullAnalysis, extractIntel } from '../src/shared/detection';
+import { checkDomainAge, getDomainParts, normalizeUnicode, runFullAnalysis, extractIntel, type AnalysisContext } from '../src/shared/detection';
 import { parseHTML } from 'linkedom';
 import { extractFormMetadata, extractLinkMetadata, extractStaticPageText } from '../src/content/form-metadata';
 import { shouldRescanForMutations } from '../src/content/mutation-filter';
@@ -519,6 +519,18 @@ assertCase('DOM fixture: legitimate multi-field login metadata stays low risk',
   domMultiSensitiveLogin.forms[0]?.sensitiveContexts?.length === 1
     && domMultiSensitiveLogin.analysis.overallSeverity !== 'threat'
     && domMultiSensitiveLogin.analysis.findings.every((finding) => finding.title !== 'Brand impersonation with sensitive form'));
+const domStudentIdentityForm = analyzeDomFixture('https://apply.example.org/student', `
+  <main><h1>Student portal</h1><form action="/student">
+    <input name="usn">
+    <input name="student_id">
+    <input name="registration_number">
+    <input name="dob">
+    <input name="date_of_birth">
+  </form></main>`);
+assertCase('DOM fixture: USN and date-of-birth fields are retained as sensitive form metadata',
+  ['usn', 'student_id', 'registration_number', 'dob', 'date_of_birth'].every((metadata) =>
+    domStudentIdentityForm.forms.some((form) => form.fields.some((field) => field.includes(metadata)))
+  ));
 
 const domDynamicLegitimate = parseHTML('<html><body><main><div id="mount"></div></main></body></html>');
 const dynamicLegitimateForm = domDynamicLegitimate.document.createElement('form');
@@ -1061,6 +1073,79 @@ const paypalLoginLinkAnalysis = runFullAnalysis('https://news.example.com/', 'Lo
 assertCase('PayPal login anchor to deceptive destination creates a mismatch signal',
   paypalLoginLinkAnalysis.findings.some((finding) => finding.title === 'Brand-destination mismatch')
     && paypalLoginLinkAnalysis.overallSeverity !== 'threat');
+const sbiSecuritiesLink = runFullAnalysis('https://onlinesbi.sbi/', 'State Bank of India official services.', {
+  linkMetadata: [{ href: 'https://www.sbisecurities.in/', label: 'SBI Securities' }],
+});
+assertCase('official SBI page linking to SBI Securities is not a brand-lookalike',
+  sbiSecuritiesLink.findings.every((finding) =>
+    finding.title !== 'Brand-lookalike domain' && finding.title !== 'Brand-destination mismatch'
+  ));
+const sbiRemittanceLink = runFullAnalysis('https://www.onlinesbi.sbi/', 'State Bank of India remittance services.', {
+  linkMetadata: [{ href: 'https://remit.sbi/', label: 'SBI remittance service' }],
+});
+assertCase('official SBI page linking to remit.sbi is not a brand-lookalike',
+  sbiRemittanceLink.findings.every((finding) =>
+    finding.title !== 'Brand-lookalike domain' && finding.title !== 'Brand-destination mismatch'
+  ));
+const iciciGroupLinks = runFullAnalysis('https://www.icicibank.com/', 'ICICI Bank official services.', {
+  linkMetadata: [
+    { href: 'https://www.icicidirect.com/', label: 'ICICI Direct investment services' },
+    { href: 'https://www.icicipru.com/', label: 'ICICI Prudential services' },
+    { href: 'https://www.iciciprulife.com/', label: 'ICICI Prudential Life' },
+  ],
+});
+assertCase('official ICICI page linking to affiliated group services is not a brand-lookalike',
+  iciciGroupLinks.findings.every((finding) =>
+    finding.title !== 'Brand-lookalike domain' && finding.title !== 'Brand-destination mismatch'
+  ));
+const officialSbiPhishingLink = runFullAnalysis('https://onlinesbi.sbi/', 'State Bank of India official net banking.', {
+  linkMetadata: [{ href: 'https://sbi-kyc.xyz/login', label: 'SBI account login and verification' }],
+});
+assertCase('official SBI page still flags a deceptive SBI login link on a suspicious TLD',
+  officialSbiPhishingLink.findings.some((finding) => finding.title === 'Brand-destination mismatch')
+    && officialSbiPhishingLink.score >= 16);
+const arbitraryHyphenatedLink = runFullAnalysis('https://news.example.org/', 'Read the latest news.', {
+  links: ['https://daily-special-offer-account-login.example.com/'],
+});
+assertCase('hyphen-heavy hostname alone adds no risk for an arbitrary outbound link',
+  arbitraryHyphenatedLink.score === 0
+    && arbitraryHyphenatedLink.findings.every((finding) => finding.title !== 'Hyphen-heavy hostname'));
+const legitimateMsrit = runFullAnalysis('https://msrit.edu/admissions/', 'Ramaiah Institute of Technology student portal sign in.', {
+  credentialForm: true,
+  forms: [{ fields: ['USN', 'student ID', 'date of birth'], action: 'https://msrit.edu/admissions/', method: 'post', buttonText: 'Continue', labelText: 'USN student ID date of birth' }],
+});
+assertCase('legitimate MSRIT domain and student identity form are not impersonation',
+  legitimateMsrit.score < 20
+    && legitimateMsrit.findings.every((finding) => finding.title !== 'Brand-domain mismatch' && finding.title !== 'Brand impersonation with sensitive form'));
+const msritImpersonation = runFullAnalysis(
+  'https://msrit-admission-example.xyz/student',
+  'MSRIT student portal login. Enter your USN and date of birth to continue.',
+  {
+    forms: [{
+      fields: ['USN', 'date of birth'],
+      action: 'https://collector.example.xyz/submit',
+      method: 'post',
+      buttonText: 'Continue',
+      labelText: 'MSRIT USN date of birth',
+      contextText: 'MSRIT student portal login. Enter your USN and date of birth.',
+      contextScope: 'fieldset',
+    }],
+  },
+);
+assertCase('MSRIT impersonation domain with student identity and sensitive form is detected',
+  msritImpersonation.overallSeverity === 'threat'
+    && msritImpersonation.findings.some((finding) => finding.title === 'Brand-domain mismatch' && finding.evidence?.brand === 'MSRIT')
+    && msritImpersonation.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form' && finding.evidence?.brand === 'MSRIT'));
+const msritDeceptiveHostname = runFullAnalysis('https://msrit-fees-login.example.com/', 'Welcome to the information portal.');
+assertCase('MSRIT deceptive fees/login hostname is identified',
+  msritDeceptiveHostname.findings.some((finding) => finding.title === 'Brand-lookalike domain'));
+const hdfcAttackerSubdomain = runFullAnalysis(
+  'https://hdfcbank.com.attacker.xyz/login',
+  'HDFC Bank account login: verify your account and enter your password.',
+  { credentialForm: true },
+);
+assertCase('HDFC official-domain string nested under attacker hostname remains detectable',
+  hdfcAttackerSubdomain.findings.some((finding) => finding.title === 'Brand-domain mismatch' && finding.evidence?.brand === 'HDFC Bank'));
 
 const passwordOnly = runFullAnalysis('https://login.example.com/', 'Sign in to continue.', {
   credentialForm: true,
@@ -1304,6 +1389,292 @@ try {
 } finally {
   globalThis.fetch = originalFetch;
 }
+
+type EvaluationCase = {
+  category: string;
+  label: string;
+  url: string;
+  text: string;
+  expected: 'legitimate' | 'scam';
+  context?: AnalysisContext;
+};
+
+const evaluationCases: EvaluationCase[] = [
+  {
+    category: 'normal login',
+    label: 'First-party account sign-in',
+    url: 'https://accounts.example.com/login',
+    text: 'Welcome back. Sign in to view your account dashboard.',
+    expected: 'legitimate',
+    context: {
+      credentialForm: true,
+      forms: [{ fields: ['email', 'password current-password'], action: 'https://accounts.example.com/login', method: 'post', buttonText: 'Sign in', labelText: 'Email password' }],
+    },
+  },
+  {
+    category: 'legitimate OTP delivery',
+    label: 'OTP with do-not-share guidance',
+    url: 'https://message.example.test/',
+    text: 'Your login OTP is 482913. Do not share it with anyone. Valid for 5 minutes.',
+    expected: 'legitimate',
+  },
+  {
+    category: 'legitimate authentication/verification',
+    label: 'User-initiated sign-in confirmation',
+    url: 'https://accounts.example.com/security',
+    text: 'Your sign-in was verified on this device. If this was you, no further action is needed.',
+    expected: 'legitimate',
+  },
+  {
+    category: 'legitimate payment/receipt',
+    label: 'Completed payment receipt',
+    url: 'https://payments.example.com/receipt',
+    text: 'Payment received successfully. Your order receipt is ready to view in your account.',
+    expected: 'legitimate',
+  },
+  {
+    category: 'legitimate delivery notification',
+    label: 'Routine parcel tracking update',
+    url: 'https://delivery.example.com/tracking',
+    text: 'Your parcel has shipped and is expected to arrive tomorrow. Track it in the courier app.',
+    expected: 'legitimate',
+  },
+  {
+    category: 'legitimate banking notification',
+    label: 'Debit alert with official support guidance',
+    url: 'https://message.example.test/',
+    text: 'Rs 2,500 debited from your account ending 1234. If this was not you, contact the number on your bank card.',
+    expected: 'legitimate',
+  },
+  {
+    category: 'legitimate utility notification',
+    label: 'Upcoming electricity bill',
+    url: 'https://utility.example.com/billing',
+    text: 'Your electricity bill is due on 5 October. View your statement in the utility app.',
+    expected: 'legitimate',
+  },
+  {
+    category: 'legitimate refund notification',
+    label: 'Refund credited to original payment method',
+    url: 'https://shop.example.com/orders',
+    text: 'Your refund of Rs 499 has been credited to your original payment method.',
+    expected: 'legitimate',
+  },
+  {
+    category: 'legitimate job listing',
+    label: 'Engineering role listing',
+    url: 'https://careers.example.com/jobs/engineer',
+    text: 'We are hiring a software engineer. Review the role requirements and apply with your resume.',
+    expected: 'legitimate',
+  },
+  {
+    category: 'security-awareness article',
+    label: 'Credential safety guidance',
+    url: 'https://security.example.org/guide',
+    text: 'Security awareness guide: never share your OTP or password. Learn how to recognize and report phishing.',
+    expected: 'legitimate',
+  },
+  {
+    category: 'normal CAPTCHA',
+    label: 'Routine human verification',
+    url: 'https://portal.example.com/verify',
+    text: 'Complete the CAPTCHA to continue browsing.',
+    expected: 'legitimate',
+  },
+  {
+    category: 'routine urgency/time-sensitive notice',
+    label: 'Appointment reminder',
+    url: 'https://clinic.example.com/appointments',
+    text: 'Reminder: your appointment is tomorrow at 9 AM. Please arrive 10 minutes early.',
+    expected: 'legitimate',
+  },
+  {
+    category: 'multilingual legitimate text',
+    label: 'Hindi routine delivery update',
+    url: 'https://message.example.test/',
+    text: 'आपका पार्सल कल पहुँचेगा। जानकारी के लिए आधिकारिक ऐप देखें।',
+    expected: 'legitimate',
+  },
+  {
+    category: 'normal family/personal message',
+    label: 'Family lunch coordination',
+    url: 'https://message.example.test/',
+    text: 'Hey, are we still meeting for lunch tomorrow at one?',
+    expected: 'legitimate',
+  },
+  {
+    category: 'legitimate external payment-provider form',
+    label: 'Merchant checkout handled by Stripe',
+    url: 'https://store.example.com/checkout',
+    text: 'Secure checkout. Your payment is processed by Stripe.',
+    expected: 'legitimate',
+    context: {
+      forms: [{ fields: ['card number', 'cc-csc'], action: 'https://checkout.stripe.com/pay', method: 'post', buttonText: 'Pay', labelText: 'Card number security code' }],
+    },
+  },
+  {
+    category: 'fake login',
+    label: 'Lookalike PayPal password form',
+    url: 'https://paypal-security-example.com/login',
+    text: 'Verify your PayPal account to continue.',
+    expected: 'scam',
+    context: {
+      credentialForm: true,
+      forms: [{ fields: ['email', 'password'], action: 'https://collector.example.xyz/submit', method: 'post', buttonText: 'Verify', labelText: 'PayPal account password' }],
+    },
+  },
+  {
+    category: 'OTP theft',
+    label: 'Direct one-time-code request',
+    url: 'https://message.example.test/',
+    text: 'Send me your OTP now to verify your account.',
+    expected: 'scam',
+  },
+  {
+    category: 'account-block/KYC scam',
+    label: 'KYC suspension threat',
+    url: 'https://message.example.test/',
+    text: 'Your bank account will be blocked today. Update KYC immediately and share your OTP.',
+    expected: 'scam',
+  },
+  {
+    category: 'refund scam',
+    label: 'Fee to release a refund',
+    url: 'https://refund.example.test/claim',
+    text: 'Pay a processing fee to receive your pending refund.',
+    expected: 'scam',
+  },
+  {
+    category: 'delivery scam',
+    label: 'Fake parcel customs threat',
+    url: 'https://message.example.test/',
+    text: 'Your parcel is held by customs. Pay a release fee immediately or it will be returned.',
+    expected: 'scam',
+  },
+  {
+    category: 'banking scam',
+    label: 'Bank account verification phishing',
+    url: 'https://message.example.test/',
+    text: 'SBI account suspended. Click this link to verify your account and enter your password.',
+    expected: 'scam',
+  },
+  {
+    category: 'fake CAPTCHA/social engineering',
+    label: 'CAPTCHA asks user to run a command',
+    url: 'https://verify.example.test/',
+    text: 'Complete this CAPTCHA, press Win+R, paste the command, and run it to verify your account.',
+    expected: 'scam',
+  },
+  {
+    category: 'remote-access scam',
+    label: 'Bank support requests AnyDesk',
+    url: 'https://message.example.test/',
+    text: 'Install AnyDesk and share your screen so our bank executive can fix your account.',
+    expected: 'scam',
+  },
+  {
+    category: 'callback phishing',
+    label: 'Urgent support callback for fake charge',
+    url: 'https://message.example.test/',
+    text: 'Suspicious charge detected. Call 18005551234 immediately to cancel it.',
+    expected: 'scam',
+  },
+  {
+    category: 'job/task scam',
+    label: 'Task earnings require a deposit',
+    url: 'https://message.example.test/',
+    text: 'Complete online tasks to earn daily. Pay a security deposit to withdraw your earnings.',
+    expected: 'scam',
+  },
+  {
+    category: 'authority impersonation',
+    label: 'Fake CBI arrest threat',
+    url: 'https://message.example.test/',
+    text: 'CBI officer says your parcel contains drugs. Pay a fine immediately or face arrest.',
+    expected: 'scam',
+  },
+  {
+    category: 'payment/advance-fee scam',
+    label: 'Lottery prize release fee',
+    url: 'https://message.example.test/',
+    text: 'You won a lottery prize. Transfer a processing fee now to release your winnings.',
+    expected: 'scam',
+  },
+  {
+    category: 'obfuscated scam',
+    label: 'Leetspeak credential theft',
+    url: 'https://message.example.test/',
+    text: 'Y0ur acc0unt is susp3nded. Send 0TP n0w or it will be bl0cked.',
+    expected: 'scam',
+  },
+  {
+    category: 'brand/domain impersonation',
+    label: 'PayPal lookalike requests credentials',
+    url: 'https://paypal-security-login.example.xyz/account',
+    text: 'PayPal account suspended. Share your password to restore access.',
+    expected: 'scam',
+    context: {
+      credentialForm: true,
+      forms: [{ fields: ['password'], action: 'https://collector.example.xyz/submit', method: 'post', buttonText: 'Restore account', labelText: 'PayPal password' }],
+    },
+  },
+  {
+    category: 'dynamically structured credential/payment form',
+    label: 'Refund form collects card and CVV',
+    url: 'https://refund-claim.example.xyz/form',
+    text: 'Your refund is pending. Verify your payment details to claim it.',
+    expected: 'scam',
+    context: {
+      credentialForm: true,
+      forms: [{ fields: ['card number', 'CVV'], action: 'https://collector.example.xyz/submit', method: 'post', buttonText: 'Claim refund', labelText: 'Card number CVV refund' }],
+    },
+  },
+];
+
+const evaluationResults = evaluationCases.map((testCase) => ({
+  testCase,
+  analysis: runFullAnalysis(testCase.url, testCase.text, testCase.context),
+}));
+const isDetectedScam = (severity: string) => severity === 'caution' || severity === 'threat';
+const legitimateResults = evaluationResults.filter(({ testCase }) => testCase.expected === 'legitimate');
+const scamResults = evaluationResults.filter(({ testCase }) => testCase.expected === 'scam');
+const falsePositiveCases = legitimateResults.filter(({ analysis }) => isDetectedScam(analysis.overallSeverity));
+const detectedScamResults = scamResults.filter(({ analysis }) => isDetectedScam(analysis.overallSeverity));
+const missedScamCases = scamResults.filter(({ analysis }) => !isDetectedScam(analysis.overallSeverity));
+
+for (const { testCase, analysis } of evaluationResults) {
+  const predictedClass = isDetectedScam(analysis.overallSeverity) ? 'scam' : 'legitimate';
+  assertCase(
+    `evaluation ${testCase.expected}: ${testCase.category} — ${testCase.label}`,
+    predictedClass === testCase.expected,
+    `expected ${testCase.expected}, got ${predictedClass} (${analysis.score}/100 ${analysis.overallSeverity})`,
+  );
+}
+
+function scoreDistribution(results: typeof evaluationResults): string {
+  if (!results.length) return 'none';
+  const sorted = [...results].sort((left, right) => left.analysis.score - right.analysis.score);
+  const buckets = [
+    { label: '0', matches: sorted.filter(({ analysis }) => analysis.score === 0) },
+    { label: '1-11', matches: sorted.filter(({ analysis }) => analysis.score >= 1 && analysis.score < 12) },
+    { label: '12-29', matches: sorted.filter(({ analysis }) => analysis.score >= 12 && analysis.score < 30) },
+    { label: '30-49', matches: sorted.filter(({ analysis }) => analysis.score >= 30 && analysis.score < 50) },
+    { label: '50-69', matches: sorted.filter(({ analysis }) => analysis.score >= 50 && analysis.score < 70) },
+    { label: '70-100', matches: sorted.filter(({ analysis }) => analysis.score >= 70) },
+  ].filter(({ matches }) => matches.length > 0);
+  const perCase = sorted.map(({ testCase, analysis }) => `${testCase.label}=${analysis.score}`).join(', ');
+  return `${buckets.map(({ label, matches }) => `${label}:${matches.length}`).join(' ')}; cases: ${perCase}`;
+}
+
+console.log('\nCategorized legitimate-vs-scam evaluation:');
+console.log(`  Legitimate cases: ${legitimateResults.length}`);
+console.log(`  Legitimate false positives: ${falsePositiveCases.length} (${(falsePositiveCases.length / legitimateResults.length * 100).toFixed(1)}%)`);
+console.log(`  Scam cases: ${scamResults.length}`);
+console.log(`  Detected scams: ${detectedScamResults.length}; missed scams: ${missedScamCases.length} (${(detectedScamResults.length / scamResults.length * 100).toFixed(1)}% detection)`);
+console.log(`  Legitimate score distribution: ${scoreDistribution(legitimateResults)}`);
+console.log(`  Detected-scam score distribution: ${scoreDistribution(detectedScamResults)}`);
+console.log(`  Missed cases: ${missedScamCases.length ? missedScamCases.map(({ testCase, analysis }) => `${testCase.category} — ${testCase.label} (${analysis.score}/100 ${analysis.overallSeverity})`).join('; ') : 'none'}`);
+console.log(`  False-positive cases: ${falsePositiveCases.length ? falsePositiveCases.map(({ testCase, analysis }) => `${testCase.category} — ${testCase.label} (${analysis.score}/100 ${analysis.overallSeverity})`).join('; ') : 'none'}`);
 
 console.log(`\nBenchmark assertions: ${passed} passed, ${failed} failed.`);
 if (failed > 0) process.exitCode = 1;
