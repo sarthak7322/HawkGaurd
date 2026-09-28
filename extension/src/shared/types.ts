@@ -100,6 +100,12 @@ export interface FormMetadata {
   labelText: string;
   contextText?: string;
   contextScope?: 'fieldset' | 'form' | 'local' | 'group' | 'section' | 'article' | 'none';
+  identityText?: string;
+  sensitiveContexts?: Array<{
+    field: string;
+    identityText: string;
+    contextScope: 'fieldset' | 'form' | 'local' | 'group';
+  }>;
 }
 
 export interface PageAnalysisContext {

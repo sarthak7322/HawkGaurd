@@ -1,12 +1,18 @@
 // HawkGuard content script — silent DOM observer that pings the background.
 
-import type { ScamAnalysis, PanelStage, FormMetadata, PageAnalysisContext } from '../shared/types';
+import type { ScamAnalysis, PanelStage, PageAnalysisContext } from '../shared/types';
+import { extractFormMetadata, extractLinkMetadata, extractStaticPageText } from './form-metadata';
+import { shouldRescanForMutations } from './mutation-filter';
 
 const BANNER_ID = 'hawkguard-alert-banner';
 const STYLE_ID = 'hawkguard-alert-style';
 let scanVersion = 0;
 let autoScanEnabled = true;
 let pageObserver: MutationObserver | undefined;
+let lastBannerSignature = '';
+const ownedUiNodes = new WeakSet<Node>();
+let bannerElement: HTMLElement | undefined;
+let styleElement: HTMLStyleElement | undefined;
 const autoScanReady = chrome.storage.local.get('settings').then((data) => {
   autoScanEnabled = data.settings?.autoScan !== false;
 }).catch((err) => {
@@ -25,8 +31,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     scanVersion++;
     pageObserver?.disconnect();
     pageObserver = undefined;
-    document.getElementById(BANNER_ID)?.remove();
-    document.getElementById(STYLE_ID)?.remove();
+    removeOwnedUi();
   }
 });
 
@@ -34,47 +39,15 @@ function extractPageData(): { text: string; context: PageAnalysisContext } {
   const root = document.querySelector('main, [role="main"], article') || document.body;
   if (!root) return { text: '', context: { referenceContent: false, credentialForm: false, links: [], linkMetadata: [], forms: [] } };
 
-  const ignored = 'script, style, noscript, svg, code, pre, kbd, nav, footer, [hidden], [aria-hidden="true"], [contenteditable]:not([contenteditable="false"]), #hawkguard-alert-banner';
+  const ignored = 'script, style, noscript, svg, code, pre, kbd, nav, footer, [hidden], [aria-hidden="true"], [contenteditable]:not([contenteditable="false"])';
   const isVisible = (el: Element) => {
     if (el.closest(ignored)) return false;
+    for (let current: Node | null = el; current; current = current.parentNode) {
+      if (ownedUiNodes.has(current)) return false;
+    }
     const style = getComputedStyle(el);
     return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse';
   };
-  const textUnits: string[] = [];
-  let currentUnit: Element | null = null;
-  let currentUnitParts: string[] = [];
-  const flushTextUnit = () => {
-    if (currentUnitParts.length) textUnits.push(currentUnitParts.join(' '));
-    currentUnitParts = [];
-  };
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: (node) => {
-      const parent = node.parentElement;
-      if (!parent || !isVisible(parent)) return NodeFilter.FILTER_REJECT;
-      const t = (node.textContent || '').trim();
-      return t.length > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-    },
-  });
-  let n: Node | null;
-  let capturedLength = 0;
-  let capturedNodes = 0;
-  const blockSelector = 'p, li, h1, h2, h3, h4, h5, h6, blockquote, label, button, td, th, figcaption, summary, dt, dd, legend, div';
-  while ((n = walker.nextNode())) {
-    const part = (n.textContent || '').trim();
-    if (!part) continue;
-    const parent = n.parentElement!;
-    const unit = parent.closest(blockSelector) || parent;
-    if (currentUnit && unit !== currentUnit) flushTextUnit();
-    currentUnit = unit;
-    currentUnitParts.push(part);
-    const remaining = 12000 - capturedLength;
-    currentUnitParts[currentUnitParts.length - 1] = part.slice(0, remaining);
-    capturedLength += Math.min(part.length, remaining);
-    capturedNodes++;
-    if (capturedNodes >= 600 || capturedLength >= 12000) break;
-  }
-  flushTextUnit();
-
   const pageTitle = document.title.trim();
   const description = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
   const brandMetadata = Array.from(document.querySelectorAll('img[alt], [aria-label]'))
@@ -82,164 +55,9 @@ function extractPageData(): { text: string; context: PageAnalysisContext } {
     .slice(0, 50)
     .map((el) => el.getAttribute('alt') || el.getAttribute('aria-label') || '')
     .filter(Boolean);
-  const text = [pageTitle, description, ...textUnits, ...brandMetadata].filter(Boolean).join('\n').slice(0, 12000);
-  const safeUrl = (raw: string): string => {
-    try {
-      const parsed = new URL(raw, location.href);
-      if (!['http:', 'https:'].includes(parsed.protocol)) return '';
-      parsed.username = '';
-      parsed.password = '';
-      parsed.search = '';
-      parsed.hash = '';
-      return parsed.toString();
-    } catch {
-      return '';
-    }
-  };
-  const staticContextText = (container: Element, limit = 600): string => {
-    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
-      acceptNode: (node) => {
-        const parent = node.parentElement;
-        if (!parent || parent.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [hidden], [aria-hidden="true"]') || !isVisible(parent)) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        return (node.textContent || '').trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-      },
-    });
-    const parts: string[] = [];
-    let node: Node | null;
-    let length = 0;
-    while ((node = walker.nextNode()) && length < limit) {
-      const part = (node.textContent || '').trim();
-      parts.push(part.slice(0, limit - length));
-      length += part.length;
-    }
-    return parts.join(' ').replace(/\s+/g, ' ').trim();
-  };
-  const formContext = (form: Element): { text: string; scope: NonNullable<FormMetadata['contextScope']> } => {
-    const sensitiveFieldPattern = /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|cc-(?:number|exp(?:-month|-year)?|csc))/i;
-    const fieldsets = Array.from(form.querySelectorAll('fieldset'));
-    const fieldset = fieldsets.find((candidate) =>
-      Array.from(candidate.querySelectorAll('input, textarea, select')).some((el) => {
-        const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
-        if (input instanceof HTMLInputElement && input.type.toLowerCase() === 'hidden') return false;
-        return sensitiveFieldPattern.test([
-          input instanceof HTMLInputElement ? input.type : '',
-          input.getAttribute('autocomplete') || '',
-          input.getAttribute('placeholder') || '',
-          input.getAttribute('aria-label') || '',
-          input.getAttribute('name') || '',
-          input.id || '',
-        ].join(' '));
-      })
-    );
-    if (fieldset) return { text: staticContextText(fieldset), scope: 'fieldset' };
-
-    const localContainer = form.parentElement;
-    const formSpecificChildren = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LABEL', 'LEGEND', 'BUTTON']);
-    if (localContainer
-      && localContainer.tagName === 'DIV'
-      && localContainer.querySelectorAll('form').length === 1
-      && Array.from(localContainer.children).every((child) => child === form || formSpecificChildren.has(child.tagName))
-      && !localContainer.matches('section, article, [role="group"]')) {
-      return { text: staticContextText(localContainer), scope: 'local' };
-    }
-
-    const group = form.querySelector('[role="group"]') || form.closest('[role="group"]');
-    if (group) return { text: staticContextText(group), scope: 'group' };
-
-    return { text: staticContextText(form), scope: 'form' };
-  };
-  const forms: FormMetadata[] = Array.from(document.querySelectorAll('form'))
-    .filter(isVisible)
-    .slice(0, 12)
-    .map((form) => {
-      const fields = Array.from(form.querySelectorAll('input, textarea, select'))
-        .filter(isVisible)
-        .map((el) => {
-          const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
-          const type = input instanceof HTMLInputElement ? input.type.toLowerCase() : '';
-          if (type === 'hidden') return '';
-          const descriptor = [
-            type,
-            input.getAttribute('autocomplete') || '',
-            input.getAttribute('placeholder') || '',
-            input.getAttribute('aria-label') || '',
-            input.getAttribute('name') || '',
-            input.id || '',
-            input.labels ? Array.from(input.labels).map((label) => label.textContent || '').join(' ') : '',
-            input.closest('label')?.textContent || '',
-          ].join(' ').replace(/\s+/g, ' ').trim();
-          return /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|email|username|cc-(?:number|exp(?:-month|-year)?|csc))/i.test(descriptor)
-            ? descriptor.slice(0, 180)
-            : '';
-        })
-        .filter(Boolean)
-        .slice(0, 12);
-      const formButtons = Array.from(form.querySelectorAll('button, input[type="submit"], [role="button"]'))
-        .filter(isVisible)
-        .map((button) => button instanceof HTMLInputElement
-          ? button.getAttribute('value') || button.getAttribute('aria-label') || ''
-          : button.textContent || button.getAttribute('aria-label') || '')
-        .join(' ').replace(/\s+/g, ' ').trim().slice(0, 240);
-      const formLabels = Array.from(form.querySelectorAll('label'))
-        .filter(isVisible)
-        .map((label) => label.textContent || '')
-        .join(' ').replace(/\s+/g, ' ').trim().slice(0, 400);
-      const localContext = formContext(form);
-      const broadContext = form.closest('section, article');
-      return {
-        fields,
-        action: safeUrl((form as HTMLFormElement).action || location.href),
-        method: ((form as HTMLFormElement).method || 'get').toLowerCase(),
-        buttonText: formButtons,
-        labelText: formLabels,
-        contextText: localContext.text || (broadContext ? staticContextText(broadContext) : ''),
-        contextScope: localContext.text ? localContext.scope : broadContext?.tagName.toLowerCase() as 'section' | 'article' || 'none',
-      };
-    });
-  const standaloneSensitiveFields = Array.from(document.querySelectorAll('input, textarea, select'))
-    .filter((el) => !el.closest('form') && isVisible(el))
-    .map((el) => {
-      const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
-      const type = input instanceof HTMLInputElement ? input.type.toLowerCase() : '';
-      if (type === 'hidden') return '';
-      const descriptor = [
-        type,
-        input.getAttribute('autocomplete') || '',
-        input.getAttribute('placeholder') || '',
-        input.getAttribute('aria-label') || '',
-        input.getAttribute('name') || '',
-        input.id || '',
-      ].join(' ').replace(/\s+/g, ' ').trim();
-      return /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|cc-(?:number|exp(?:-month|-year)?|csc))/i.test(descriptor)
-        ? descriptor.slice(0, 180)
-        : '';
-    })
-    .filter(Boolean)
-    .slice(0, 12);
-  if (standaloneSensitiveFields.length) {
-    forms.push({
-      fields: standaloneSensitiveFields,
-      action: safeUrl(location.href),
-      method: 'get',
-      buttonText: '',
-      labelText: '',
-    });
-  }
-  const credentialForm = forms.some((form) =>
-    form.fields.some((field) => /(password|passcode|otp|one[- ]time|cvv|c\.v\.v|pin|card|account|aadhaar|pan|cc-(?:number|exp(?:-month|-year)?|csc))/i.test(field))
-  );
-
-  const linkMetadata = Array.from(document.querySelectorAll('a[href]'))
-    .filter(isVisible)
-    .slice(0, 30)
-    .map((el) => {
-      const anchor = el as HTMLAnchorElement;
-      const href = safeUrl(anchor.href);
-      return href ? { href, label: (anchor.innerText || anchor.getAttribute('aria-label') || anchor.title || '').replace(/\s+/g, ' ').trim().slice(0, 200) } : null;
-    })
-    .filter((link): link is { href: string; label: string } => link !== null);
+  const text = [pageTitle, description, extractStaticPageText(root, isVisible), ...brandMetadata].filter(Boolean).join('\n').slice(0, 12000);
+  const { forms, credentialForm } = extractFormMetadata(document, location.href, isVisible);
+  const linkMetadata = extractLinkMetadata(document, location.href, isVisible);
   const links = linkMetadata.map((link) => link.href);
 
   const codeLength = Array.from(root.querySelectorAll('pre, code'))
@@ -261,17 +79,39 @@ function extractPageData(): { text: string; context: PageAnalysisContext } {
   };
 }
 
+function removeOwnedUi() {
+  bannerElement?.remove();
+  styleElement?.remove();
+  bannerElement = undefined;
+  styleElement = undefined;
+  lastBannerSignature = '';
+}
+
 function injectBanner(analysis: ScamAnalysis) {
-  document.getElementById(BANNER_ID)?.remove();
-  document.getElementById(STYLE_ID)?.remove();
-  if (analysis.overallSeverity === 'safe') return;
+  if (analysis.overallSeverity === 'safe') {
+    removeOwnedUi();
+    return;
+  }
+  const signature = JSON.stringify([
+    analysis.overallSeverity,
+    analysis.score,
+    analysis.suspicionReasons.slice(0, 2),
+  ]);
+  if (signature === lastBannerSignature
+    && bannerElement?.isConnected
+    && styleElement?.isConnected) return;
+  removeOwnedUi();
 
   const banner = document.createElement('div');
   banner.id = BANNER_ID;
+  ownedUiNodes.add(banner);
+  bannerElement = banner;
   banner.setAttribute('data-severity', analysis.overallSeverity);
 
   const style = document.createElement('style');
   style.id = STYLE_ID;
+  ownedUiNodes.add(style);
+  styleElement = style;
   style.textContent = `
     #${BANNER_ID} {
       position: fixed;
@@ -390,6 +230,7 @@ function injectBanner(analysis: ScamAnalysis) {
   `;
 
   document.documentElement.insertBefore(banner, document.body);
+  lastBannerSignature = signature;
 
   banner.querySelector('.hg-close')?.addEventListener('click', () => banner.remove());
   banner.querySelector('.hg-btn-block')?.addEventListener('click', () => {
@@ -426,8 +267,7 @@ async function scan() {
   try {
     await autoScanReady;
     if (!autoScanEnabled) {
-      document.getElementById(BANNER_ID)?.remove();
-      document.getElementById(STYLE_ID)?.remove();
+      removeOwnedUi();
       return;
     }
     const version = ++scanVersion;
@@ -437,8 +277,7 @@ async function scan() {
     if (document.querySelector('meta[name="hawkguard"][content="decoy"]')) return;
     const { text, context } = extractPageData();
     if (!text) {
-      document.getElementById(BANNER_ID)?.remove();
-      document.getElementById(STYLE_ID)?.remove();
+      removeOwnedUi();
       return;
     }
     const res = await chrome.runtime.sendMessage({
@@ -462,17 +301,14 @@ function scheduleScan() {
 function observeDynamicContent() {
   if (!autoScanEnabled || !document.body || pageObserver) return;
   pageObserver = new MutationObserver((records) => {
-    if (records.some((record) => {
-      const target = record.target instanceof Element ? record.target : record.target.parentElement;
-      return !target?.closest(`#${BANNER_ID}`);
-    })) scheduleScan();
+    if (shouldRescanForMutations(records, ownedUiNodes)) scheduleScan();
   });
   pageObserver.observe(document.body, {
     subtree: true,
     childList: true,
     characterData: true,
     attributes: true,
-    attributeFilter: ['href', 'placeholder', 'aria-label', 'name', 'id', 'type', 'alt', 'title', 'hidden', 'aria-hidden', 'style'],
+    attributeFilter: ['href', 'action', 'method', 'autocomplete', 'placeholder', 'aria-label', 'name', 'id', 'type', 'alt', 'title', 'hidden', 'aria-hidden', 'style'],
   });
 }
 

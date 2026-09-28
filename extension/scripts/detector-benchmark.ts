@@ -1,4 +1,7 @@
 import { checkDomainAge, getDomainParts, normalizeUnicode, runFullAnalysis, extractIntel } from '../src/shared/detection';
+import { parseHTML } from 'linkedom';
+import { extractFormMetadata, extractLinkMetadata, extractStaticPageText } from '../src/content/form-metadata';
+import { shouldRescanForMutations } from '../src/content/mutation-filter';
 
 const SCAMS = [
   'Dear customer your SBI account will be blocked today. Update KYC immediately: http://sbi-kyc.xyz',
@@ -42,6 +45,31 @@ function assertCase(label: string, actual: boolean, detail = '') {
     failed++;
     console.error(`  ✗ ${label}${detail ? ` — ${detail}` : ''}`);
   }
+}
+
+function analyzeDomFixture(url: string, html: string) {
+  const { document } = parseHTML(html);
+  const ignored = 'script, style, noscript, svg, code, pre, kbd, nav, footer, [hidden], [aria-hidden="true"], [contenteditable]:not([contenteditable="false"])';
+  const isVisible = (element: Element) => {
+    if (element.closest(ignored)) return false;
+    const style = element.getAttribute('style') || '';
+    return !/(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse))/i.test(style);
+  };
+  const root = document.querySelector('main, [role="main"], article') || document.body;
+  const { forms, credentialForm } = extractFormMetadata(document, url, isVisible);
+  const linkMetadata = extractLinkMetadata(document, url, isVisible);
+  const text = [
+    document.querySelector('title')?.textContent || '',
+    extractStaticPageText(root, isVisible),
+  ].filter(Boolean).join('\n');
+  const analysis = runFullAnalysis(url, text, {
+    referenceContent: /\/(?:docs?|documentation|wiki|research)\b/i.test(new URL(url).pathname),
+    forms,
+    credentialForm,
+    links: linkMetadata.map((link) => link.href),
+    linkMetadata,
+  });
+  return { document, text, forms, linkMetadata, analysis };
 }
 
 console.log('Scam-message corpus (should be caution/threat):');
@@ -254,6 +282,252 @@ assertCase('punycode lookalike hostname is detected',
     credentialForm: true,
     forms: [{ fields: ['password'], action: 'https://pаypal.example/collect', method: 'post', buttonText: 'Sign in', labelText: 'PayPal account password' }],
   }).findings.some((finding) => finding.title === 'Brand-domain mismatch'));
+
+console.log('DOM extraction and dynamic form fixtures:');
+const domNormalLogin = analyzeDomFixture('https://www.paypal.com/signin', `
+  <main><form action="/signin" method="post"><fieldset><legend>PayPal sign in</legend>
+  <label>Email <input type="email" name="email"></label>
+  <label>Password <input type="password" name="password"></label>
+  <button>Log in</button></fieldset></form></main>`);
+assertCase('DOM fixture: official-domain normal login remains safe',
+  domNormalLogin.analysis.overallSeverity === 'safe'
+    && domNormalLogin.forms[0]?.contextScope === 'fieldset');
+
+const domArticleUnrelatedLogin = analyzeDomFixture('https://paypal-security-example.com/research', `
+  <main><section><article><h1>Security advice</h1>
+  <p>Beware of fake PayPal login pages. Never enter your password.</p></article>
+  <form action="/session"><label>Newsletter password <input type="password" name="newsletter"></label>
+  <button>Subscribe</button></form></section></main>`);
+assertCase('DOM fixture: security article plus unrelated login is not strong impersonation',
+  domArticleUnrelatedLogin.analysis.findings.every((finding) => finding.title !== 'Brand impersonation with sensitive form'));
+
+const domRemotePayPalText = analyzeDomFixture('https://paypal-security-example.com/login', `
+  <main><article><h2>PayPal account verification</h2><p>PayPal security information.</p></article>
+  <form action="/session"><label>Password <input type="password" name="password"></label>
+  <button>Continue</button></form></main>`);
+assertCase('DOM fixture: PayPal text elsewhere plus unrelated password form is not local identity',
+  domRemotePayPalText.analysis.findings.every((finding) =>
+    finding.title !== 'Brand impersonation with sensitive form'
+      && !(finding.title === 'Brand-domain mismatch' && finding.evidence?.brand === 'PayPal')));
+
+const domRemoteLabel = analyzeDomFixture('https://paypal-security-example.com/login', `
+  <main><form id="other"><label for="remote-password">PayPal account verification</label></form>
+  <form action="/session"><input id="remote-password" type="password" name="password">
+  <button>Continue</button></form></main>`);
+assertCase('DOM fixture: label in another form cannot identify a sensitive field',
+  !domRemoteLabel.forms[1]?.identityText?.includes('PayPal')
+    && domRemoteLabel.analysis.findings.every((finding) => finding.title !== 'Brand impersonation with sensitive form'));
+
+const domDuplicateFieldId = analyzeDomFixture('https://paypal-security-example.com/login', `
+  <main><label for="duplicate-password">PayPal verification</label>
+  <div id="duplicate-password"></div>
+  <form action="/session"><input id="duplicate-password" type="password" name="password">
+  <button>Continue</button></form></main>`);
+assertCase('DOM fixture: duplicate field ID does not guess an explicit label association',
+  !domDuplicateFieldId.forms[0]?.identityText?.includes('PayPal')
+    && domDuplicateFieldId.analysis.findings.every((finding) => finding.title !== 'Brand impersonation with sensitive form'));
+
+const domPayPalOtherFieldset = analyzeDomFixture('https://paypal-security-example.com/login', `
+  <main><form action="/session">
+  <fieldset><legend>PayPal account verification</legend><label>Password <input type="password" name="password"></label></fieldset>
+  <fieldset><legend>Unrelated security code</legend><label>One-time code <input type="text" name="otp"></label></fieldset>
+  <button>Continue</button></form></main>`);
+assertCase('DOM fixture: separate sensitive fieldsets do not merge into a larger PayPal context',
+  domPayPalOtherFieldset.forms[0]?.sensitiveContexts?.length === 2
+    && domPayPalOtherFieldset.forms[0]?.sensitiveContexts?.[0].identityText.includes('PayPal')
+    && !domPayPalOtherFieldset.forms[0]?.sensitiveContexts?.[1].identityText.includes('PayPal')
+    && domPayPalOtherFieldset.analysis.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form'));
+
+const domPayPalLabelOtherSensitiveField = analyzeDomFixture('https://paypal-security-example.com/login', `
+  <main><form action="/session">
+  <fieldset><label>PayPal account verification</label><input type="text" name="information"></fieldset>
+  <fieldset><label>Password <input type="password" name="password"></label></fieldset>
+  <button>Continue</button></form></main>`);
+assertCase('DOM fixture: PayPal field label cannot identify another sensitive field in a separate fieldset',
+  domPayPalLabelOtherSensitiveField.forms[0]?.sensitiveContexts?.length === 1
+    && !domPayPalLabelOtherSensitiveField.forms[0]?.sensitiveContexts?.[0].identityText.includes('PayPal')
+    && domPayPalLabelOtherSensitiveField.analysis.findings.every((finding) => finding.title !== 'Brand impersonation with sensitive form'));
+
+const domMultipleBrandFieldsets = analyzeDomFixture('https://paypal-security-example.com/login', `
+  <main><form action="/session">
+  <fieldset><legend>PayPal account verification</legend><label>Password <input type="password" name="password"></label><button>Verify PayPal</button></fieldset>
+  <fieldset><legend>HDFC account verification</legend><label>OTP <input type="text" name="otp"></label><button>Verify HDFC</button></fieldset>
+  </form></main>`);
+assertCase('DOM fixture: brand claims in separate fieldsets remain independently associated',
+  domMultipleBrandFieldsets.forms[0]?.sensitiveContexts?.length === 2
+    && domMultipleBrandFieldsets.forms[0]?.sensitiveContexts?.[0].identityText.includes('PayPal')
+    && domMultipleBrandFieldsets.forms[0]?.sensitiveContexts?.[1].identityText.includes('HDFC')
+    && domMultipleBrandFieldsets.analysis.findings.some((finding) =>
+      finding.title === 'Brand impersonation with sensitive form' && finding.evidence?.brand === 'PayPal')
+    && domMultipleBrandFieldsets.analysis.findings.every((finding) =>
+      finding.title !== 'Brand impersonation with sensitive form' || finding.evidence?.brand !== 'HDFC'));
+
+const domUnrelatedFormLabel = analyzeDomFixture('https://paypal-security-example.com/login', `
+  <main><form action="/session">
+  <label>PayPal account verification</label>
+  <div><label>Password <input type="password" name="password"></label></div>
+  <button>Continue</button></form></main>`);
+assertCase('DOM fixture: unrelated form-wide label does not become sensitive-field identity evidence',
+  !domUnrelatedFormLabel.forms[0]?.sensitiveContexts?.[0]?.identityText.includes('PayPal')
+    && domUnrelatedFormLabel.analysis.findings.every((finding) => finding.title !== 'Brand impersonation with sensitive form'));
+
+const domExplicitPaypalLabel = analyzeDomFixture('https://paypal-security-example.com/login', `
+  <main><form action="/session"><fieldset>
+  <label for="paypal-password">PayPal password</label>
+  <input id="paypal-password" type="password" name="password">
+  <button>Verify account</button></fieldset></form></main>`);
+assertCase('DOM fixture: unique explicit label for the exact sensitive field establishes local identity',
+  domExplicitPaypalLabel.forms[0]?.identityText?.includes('PayPal')
+    && domExplicitPaypalLabel.analysis.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form'));
+
+const domFieldsetPaypalLabel = analyzeDomFixture('https://paypal-security-example.com/login', `
+  <main><form action="/session"><fieldset>
+  <legend>PayPal account verification</legend>
+  <label>PayPal password <input type="password" name="password"></label>
+  <button>Continue</button></fieldset></form></main>`);
+assertCase('DOM fixture: wrapping PayPal label and same-fieldset identity remain effective',
+  domFieldsetPaypalLabel.forms[0]?.identityText?.includes('PayPal')
+    && domFieldsetPaypalLabel.analysis.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form'));
+
+const domLocalPaypalAction = analyzeDomFixture('https://paypal-security-example.com/login', `
+  <main><form action="/session"><div role="group">
+  <label>Password <input type="password" name="password"></label>
+  <button>Verify PayPal account</button></div></form></main>`);
+assertCase('DOM fixture: PayPal action inside the sensitive field logical group establishes identity',
+  domLocalPaypalAction.forms[0]?.identityText?.includes('Verify PayPal account')
+    && domLocalPaypalAction.analysis.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form'));
+
+const domTrustedPayment = analyzeDomFixture('https://shop.example.com/checkout', `
+  <main><form action="https://checkout.stripe.com/pay" method="post">
+  <label>Card number <input autocomplete="cc-number" name="card"></label>
+  <label>Security code <input autocomplete="cc-csc" name="code"></label>
+  <button>Pay</button></form></main>`);
+assertCase('DOM fixture: payment form to trusted external provider stays low risk',
+  domTrustedPayment.analysis.overallSeverity !== 'threat'
+    && domTrustedPayment.analysis.findings.every((finding) => finding.title !== 'Sensitive form external destination'));
+
+const domMultiBrandInfo = analyzeDomFixture('https://finance.example.org/articles', `
+  <main><article><h1>HDFC and PayPal account security</h1>
+  <p>This informational article compares Google Pay and PayPal features.</p>
+  <a href="https://docs.example.org/security">Read documentation</a>
+  <a href="https://news.example.net/">More information</a></article>
+  <form action="/newsletter"><label>Email <input type="email" name="email"></label>
+  <button>Subscribe</button></form></main>`);
+assertCase('DOM fixture: multi-brand information and unrelated form stays safe',
+  domMultiBrandInfo.analysis.overallSeverity === 'safe'
+    && domMultiBrandInfo.analysis.findings.every((finding) => finding.title !== 'Brand-domain mismatch'));
+const editableContentFixture = analyzeDomFixture('https://news.example.org/article', `
+  <main><p>Read the article.</p>
+  <a href="https://docs.example.org/guide"><span contenteditable="true">PRIVATE DRAFT CANARY</span> documentation</a>
+  <form><label>Password <input type="password" name="password"></label></form></main>`);
+assertCase('DOM fixture: contenteditable drafts are excluded from page text and link labels',
+  !editableContentFixture.text.includes('PRIVATE DRAFT CANARY')
+    && editableContentFixture.linkMetadata.every((link) => !link.label.includes('PRIVATE DRAFT CANARY')),
+  `${editableContentFixture.text} | ${editableContentFixture.linkMetadata.map((link) => link.label).join(', ')}`);
+
+const domPaypalVerification = analyzeDomFixture('https://paypal-security-example.com/login', `
+  <main><form action="/collect" method="post"><fieldset>
+  <legend>Verify your PayPal account</legend>
+  <label>Password <input type="password" name="password"></label>
+  <button>Verify PayPal account</button>
+  </fieldset></form></main>`);
+assertCase('DOM fixture: deceptive PayPal verification form is detected',
+  domPaypalVerification.analysis.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form')
+    && domPaypalVerification.analysis.overallSeverity === 'threat');
+
+const domLocalContainer = analyzeDomFixture('https://paypal-security-example.com/verify', `
+  <main><div><h2>Verify your PayPal account</h2>
+  <form action="/collect"><label>Password <input type="password" name="password"></label>
+  <button>Verify PayPal account</button></form></div></main>`);
+assertCase('DOM fixture: local form container associates brand claim with sensitive form',
+  domLocalContainer.forms[0]?.contextScope === 'local'
+    && domLocalContainer.analysis.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form'));
+
+const domSuspiciousAction = analyzeDomFixture('https://secure-shop.example.com/login', `
+  <main><form action="https://collector.example.xyz/submit" method="post"><fieldset>
+  <legend>PayPal account verification</legend>
+  <label>Password <input type="password" name="password"></label>
+  <button>Verify account</button></fieldset></form></main>`);
+assertCase('DOM fixture: related PayPal form with suspicious external action is detected',
+  domSuspiciousAction.analysis.findings.some((finding) => finding.title === 'Brand-domain mismatch')
+    && domSuspiciousAction.analysis.overallSeverity === 'threat');
+
+const dynamicDom = parseHTML('<html><body><main><article>PayPal security information</article></main></body></html>');
+const dynamicUrl = 'https://paypal-security-example.com/research';
+const dynamicVisible = (element: Element) => !element.closest('[hidden], [contenteditable]:not([contenteditable="false"])');
+const dynamicBefore = extractFormMetadata(dynamicDom.document, dynamicUrl, dynamicVisible);
+const dynamicForm = dynamicDom.document.createElement('form');
+dynamicForm.setAttribute('action', 'https://collector.example.xyz/collect');
+dynamicForm.innerHTML = '<fieldset><legend>Verify your PayPal account</legend><label>Password <input type="password" name="password"></label><button>Verify</button></fieldset>';
+dynamicDom.document.querySelector('main')?.appendChild(dynamicForm);
+const dynamicAfterForms = extractFormMetadata(dynamicDom.document, dynamicUrl, dynamicVisible);
+const dynamicAfterText = extractStaticPageText(dynamicDom.document.body, dynamicVisible);
+const dynamicAfter = runFullAnalysis(dynamicUrl, dynamicAfterText, {
+  referenceContent: true,
+  forms: dynamicAfterForms.forms,
+  credentialForm: dynamicAfterForms.credentialForm,
+});
+assertCase('dynamic DOM fixture: inserted suspicious form is present in fresh extraction and detected',
+  dynamicBefore.forms.length === 0
+    && dynamicAfterForms.forms.length === 1
+    && dynamicAfter.findings.some((finding) => finding.title === 'Brand impersonation with sensitive form')
+    && dynamicAfter.overallSeverity === 'threat');
+
+const mutationDom = parseHTML('<html><body></body></html>').document;
+const ownedUiNodes = new WeakSet<Node>();
+const ownedBanner = mutationDom.createElement('div');
+ownedBanner.id = 'hawkguard-alert-banner';
+ownedUiNodes.add(ownedBanner);
+const ownedBannerChild = mutationDom.createElement('span');
+ownedBanner.appendChild(ownedBannerChild);
+const ownedStyle = mutationDom.createElement('style');
+ownedStyle.id = 'hawkguard-alert-style';
+ownedUiNodes.add(ownedStyle);
+const pageForm = mutationDom.createElement('form');
+const pageOwnedIdBanner = mutationDom.createElement('div');
+pageOwnedIdBanner.id = 'hawkguard-alert-banner';
+const pageOwnedIdStyle = mutationDom.createElement('div');
+pageOwnedIdStyle.id = 'hawkguard-alert-style';
+const pageFormUnderOwnedId = mutationDom.createElement('form');
+const fakeMutation = (target: Node, addedNodes: Node[] = [], removedNodes: Node[] = []) => ({
+  target, addedNodes, removedNodes,
+});
+let scheduledMutationScans = 0;
+for (const mutation of [
+  fakeMutation(mutationDom.body, [ownedBanner]),
+  fakeMutation(ownedBannerChild, [mutationDom.createTextNode('updated banner text')]),
+  fakeMutation(mutationDom.head, [ownedStyle]),
+  fakeMutation(mutationDom.body, [], [ownedBanner]),
+]) {
+  if (shouldRescanForMutations([mutation], ownedUiNodes)) scheduledMutationScans++;
+}
+const dynamicPageMutationSchedulesScan = shouldRescanForMutations(
+  [fakeMutation(mutationDom.body, [pageForm])],
+  ownedUiNodes,
+);
+const mixedMutationSchedulesScan = shouldRescanForMutations(
+  [fakeMutation(mutationDom.body, [ownedBanner, pageForm])],
+  ownedUiNodes,
+);
+const spoofedBannerIdSchedulesScan = shouldRescanForMutations(
+  [fakeMutation(mutationDom.body, [pageOwnedIdBanner])],
+  ownedUiNodes,
+);
+const spoofedStyleIdSchedulesScan = shouldRescanForMutations(
+  [fakeMutation(mutationDom.body, [pageOwnedIdStyle])],
+  ownedUiNodes,
+);
+pageOwnedIdBanner.appendChild(pageFormUnderOwnedId);
+const formUnderSpoofedIdSchedulesScan = shouldRescanForMutations(
+  [fakeMutation(pageOwnedIdBanner, [pageFormUnderOwnedId])],
+  ownedUiNodes,
+);
+assertCase('mutation filter: actual HawkGuard banner/style node mutations are ignored',
+  scheduledMutationScans === 0);
+assertCase('mutation filter: page-created matching IDs are not treated as HawkGuard-owned',
+  spoofedBannerIdSchedulesScan && spoofedStyleIdSchedulesScan && formUnderSpoofedIdSchedulesScan);
+assertCase('mutation filter: new page forms and mixed page/UI changes still schedule rescans',
+  dynamicPageMutationSchedulesScan && mixedMutationSchedulesScan);
 
 console.log('Branch 2 domain, form, and scoring regressions:');
 assertCase('legitimate PayPal domain with login form remains low risk',

@@ -603,29 +603,41 @@ function detectBrandDomainMismatch(
     let strong = false;
     for (const form of context.forms || []) {
       if (!form.fields.some((field) => SENSITIVE_FIELD_PATTERN.test(field))) continue;
-      const directFormText = [form.buttonText, form.labelText, ...form.fields].filter(Boolean).join('\n');
-      const localText = form.contextScope === 'section' || form.contextScope === 'article'
-        ? directFormText
-        : [form.contextText, directFormText].filter(Boolean).join('\n');
-      const localBrandClaim = rule.pattern.test(localText)
-        && /\b(?:login|log\s*in|sign[ -]?in|verify|verification|account|password|passcode|otp|pin|cvv|card|suspended|blocked|restore|reactivate)\b/i.test(localText);
-      if (!localBrandClaim) continue;
-      if (hostnameClaim) {
-        strong = true;
-        break;
-      }
+      const localContexts = form.sensitiveContexts !== undefined
+        ? form.sensitiveContexts
+          .filter((item) => SENSITIVE_FIELD_PATTERN.test(item.field))
+          .map((item) => item.identityText)
+        : [form.identityText !== undefined
+          ? form.identityText
+          : [
+            ...(form.contextScope === 'section' || form.contextScope === 'article' ? [] : [form.contextText || '']),
+            form.buttonText,
+            form.labelText,
+            ...form.fields,
+          ].filter(Boolean).join('\n')];
 
-      const destination = hostFromUrl(cleanUrl(form.action));
-      if (!destination) continue;
-      const destinationDomain = getDomainParts(destination).registrableDomain;
-      if (!destinationDomain || destinationDomain === pageDomain
-        || trustedProviders.some((provider) => destinationDomain === provider || destinationDomain.endsWith(`.${provider}`))) continue;
-      const destinationSignals = analyzeDomain(destination, 'link').findings;
-      if (brandHostnameEvidence(destination, rule).length > 0
-        || destinationSignals.some((finding) => ['Suspicious TLD', 'URL shortener', 'Raw IP address'].includes(finding.title))) {
-        strong = true;
-        break;
+      for (const localText of localContexts) {
+        const localBrandClaim = rule.pattern.test(localText)
+          && /\b(?:login|log\s*in|sign[ -]?in|verify|verification|account|password|passcode|otp|pin|cvv|card|suspended|blocked|restore|reactivate)\b/i.test(localText);
+        if (!localBrandClaim) continue;
+        if (hostnameClaim) {
+          strong = true;
+          break;
+        }
+
+        const destination = hostFromUrl(cleanUrl(form.action));
+        if (!destination) continue;
+        const destinationDomain = getDomainParts(destination).registrableDomain;
+        if (!destinationDomain || destinationDomain === pageDomain
+          || trustedProviders.some((provider) => destinationDomain === provider || destinationDomain.endsWith(`.${provider}`))) continue;
+        const destinationSignals = analyzeDomain(destination, 'link').findings;
+        if (brandHostnameEvidence(destination, rule).length > 0
+          || destinationSignals.some((finding) => ['Suspicious TLD', 'URL shortener', 'Raw IP address'].includes(finding.title))) {
+          strong = true;
+          break;
+        }
       }
+      if (strong) break;
     }
 
     const relatedTextAction = text.split('\n').some((line) =>
